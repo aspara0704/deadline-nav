@@ -3,69 +3,37 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#f7f7f8" />
+  <meta name="theme-color" content="#f4f6fa" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="Deadline Navi" />
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="apple-touch-icon" href="apple-touch-icon.png" />
-  <title>Deadline Navi v0.5.1</title>
+  <title>Deadline Navi</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <main class="app-shell">
-    <header class="hero">
-      <p class="eyebrow">Prototype v0.5.1</p>
-      <h1>Deadline Navi</h1>
-      <p class="lead">「締切を守りつつ、どのICから高速に乗ると最も安い？」を計算します。</p>
+    <header class="topbar">
+      <div>
+        <p class="brand-kicker">Deadline Navi</p>
+        <h1>到着時刻から、いちばん安い高速切替を。</h1>
+      </div>
+      <span class="version-chip">v0.6</span>
     </header>
 
-    <section class="card" id="apiCard">
-      <div class="section-head">
+    <section class="card trip-card">
+      <div class="section-head compact">
         <div>
-          <h2>Google Maps API</h2>
-          <p class="muted">APIキーはブラウザ内に保存します。ローカルファイルでは、このタブ内だけ保持する場合があります。</p>
+          <p class="section-kicker">Trip</p>
+          <h2>今回の走行</h2>
         </div>
-        <span id="apiStatus" class="badge badge-warn">未設定</span>
       </div>
-      <div class="input-row">
-        <label class="field grow">
-          <span>APIキー</span>
-          <input id="apiKey" type="password" autocomplete="off" placeholder="AIza..." />
-        </label>
-        <button id="saveApiKey" class="button secondary" type="button">保存</button>
-      </div>
-      <p class="hint">Maps JavaScript API と Routes API を有効化したキーを使用してください。</p>
-      <div class="monitor-actions">
-        <button id="googleDiag" class="button secondary" type="button">Google APIを診断</button>
-      </div>
-      <pre id="googleDiagResult" class="diagnostic-output hidden" aria-live="polite"></pre>
-    </section>
-
-    <section class="card" id="navitimeCard">
-      <div class="section-head">
-        <div>
-          <h2>NAVITIME Route(car) / RapidAPI</h2>
-          <p class="muted">候補ICから目的地までのETC料金取得に使います。キーはソースコードへ書き込みません。</p>
-        </div>
-        <span id="navitimeStatus" class="badge badge-warn">未設定</span>
-      </div>
-      <div class="input-row">
-        <label class="field grow">
-          <span>X-RapidAPI-Key</span>
-          <input id="navitimeApiKey" type="password" autocomplete="off" placeholder="RapidAPIで取得したキー" />
-        </label>
-        <button id="saveNavitimeApiKey" class="button secondary" type="button">保存</button>
-      </div>
-      <p class="hint">navitime-route-car.p.rapidapi.com の Route(car) を利用します。普通車・ETC利用として料金を計算します。</p>
-    </section>
-
-    <section class="card">
-      <h2>今回の走行</h2>
 
       <div class="field-grid">
         <label class="field full">
           <span>目的地</span>
-          <input id="destination" type="text" inputmode="text" placeholder="例：エスポット静岡東店 / 静岡県○○市..." />
+          <input id="destination" type="text" inputmode="text" placeholder="例：エスポット富士松岡店" />
         </label>
 
         <label class="field">
@@ -80,50 +48,112 @@
             <span>分</span>
           </div>
         </label>
-
-        <label class="field full debug-time-field">
-          <span>デバッグ用の仮想現在時刻</span>
-          <div class="debug-time-row">
-            <label class="debug-check"><input id="useDebugNow" type="checkbox" /> <span>仮想時刻を使う</span></label>
-            <input id="debugNow" type="datetime-local" disabled />
-            <button id="setDebugNowReal" class="button secondary compact-button" type="button">実時間を入力</button>
-          </div>
-          <small class="field-help">未使用なら端末の現在時刻を使います。未来時刻ならGoogleにも出発時刻として渡し、将来交通を予測します。過去時刻ではETAの時計だけ仮想化し、Google交通情報は現在値を使います。</small>
-        </label>
       </div>
 
       <div class="location-panel">
         <div class="section-head compact">
           <div>
-            <h3>出発地点</h3>
-            <p id="locationText" class="muted">現在地をまだ取得していません。</p>
+            <p class="mini-label">出発地点</p>
+            <p id="locationText" class="location-value">現在地をまだ取得していません。</p>
           </div>
           <button id="getLocation" class="button secondary" type="button">現在地を取得</button>
         </div>
-
-        <details>
-          <summary>現在地が使えない場合は手入力</summary>
+        <details class="inline-details">
+          <summary>出発地を手入力する</summary>
           <label class="field manual-origin">
             <span>出発地</span>
-            <input id="manualOrigin" type="text" placeholder="例：京都駅 / 京都市中京区..." />
+            <input id="manualOrigin" type="text" placeholder="例：京都大学熊野寮" />
           </label>
         </details>
-      </div>
-
-      <div class="preset-note">
-        <strong>v0.5.1 実時間補正つき粗密探索：</strong>まず下道だけで締切を守れるか判定し、守れる場合は追加料金0円で終了します。高速が必要な場合は、ルート上の仮想地点を各地点への実際の到着予想時刻で評価し、期限境界を特定。その周辺の実在ICを粗密探索し、期限直前の候補を必ず料金比較します。
       </div>
 
       <button id="calculate" class="button primary wide" type="button">現在の判断を計算</button>
       <p id="formError" class="error" role="alert"></p>
     </section>
 
+    <section id="resultSection" class="result-section hidden" aria-live="polite">
+      <article id="decisionCard" class="decision-card">
+        <p class="decision-kicker">現在の判断</p>
+        <h2 id="decisionText">—</h2>
+        <p id="decisionSubtext" class="decision-subtext">—</p>
+      </article>
+
+      <article id="switchSummary" class="switch-hero card hidden">
+        <div>
+          <p id="switchModeLabel" class="section-kicker">推奨高速入口</p>
+          <p id="switchIc" class="switch-ic">—</p>
+          <p id="switchRoad" class="muted">—</p>
+        </div>
+        <div class="switch-highlight">
+          <div><span>高速料金</span><strong id="switchToll">—</strong></div>
+          <div><span>目的地到着</span><strong id="switchDestinationEta">—</strong></div>
+        </div>
+        <dl class="switch-facts compact-facts">
+          <div><dt>IC到着予想</dt><dd id="switchArrival">—</dd></div>
+          <div><dt>高速切替期限</dt><dd id="switchDeadline">—</dd></div>
+          <div><dt>期限まで</dt><dd id="switchRemaining">—</dd></div>
+        </dl>
+      </article>
+
+      <div class="metric-grid product-metrics">
+        <article class="metric-card">
+          <p class="metric-label">下道到着</p>
+          <p id="localEta" class="metric-value">—</p>
+          <p id="localDuration" class="metric-note">—</p>
+        </article>
+        <article class="metric-card">
+          <p class="metric-label">通常ルート到着</p>
+          <p id="fastEta" class="metric-value">—</p>
+          <p id="fastDuration" class="metric-note">—</p>
+        </article>
+        <article class="metric-card accent-card">
+          <p class="metric-label">高速の時間効果</p>
+          <p id="timeSaved" class="metric-value">—</p>
+          <p id="tollPrice" class="metric-note">料金 —</p>
+        </article>
+        <article class="metric-card accent-card">
+          <p class="metric-label">下道の余裕</p>
+          <p id="slack" class="metric-value">—</p>
+          <p class="metric-note">安全マージン込み</p>
+        </article>
+      </div>
+
+      <details class="card disclosure-card">
+        <summary>候補と比較の詳細</summary>
+        <div class="disclosure-body">
+          <div class="section-head compact">
+            <div>
+              <h2>高速切替候補</h2>
+              <p id="candidateStatus" class="muted">期限境界と周辺ICを探索しています…</p>
+            </div>
+            <span id="candidateCount" class="badge badge-neutral">—</span>
+          </div>
+          <div id="candidateList" class="candidate-list"></div>
+
+          <div class="details-divider"></div>
+          <div class="section-head compact">
+            <div>
+              <h2>比較詳細</h2>
+              <p id="calculatedAt" class="muted">—</p>
+            </div>
+            <button id="recalculate" class="button secondary compact-button" type="button">再計算</button>
+          </div>
+          <dl class="comparison-list">
+            <div><dt>下道優先距離</dt><dd id="localDistance">—</dd></div>
+            <div><dt>通常ルート距離</dt><dd id="fastDistance">—</dd></div>
+            <div><dt>到着期限</dt><dd id="deadlineDisplay">—</dd></div>
+            <div><dt>安全マージン</dt><dd id="marginDisplay">—</dd></div>
+          </dl>
+        </div>
+      </details>
+    </section>
 
     <section class="card monitor-card">
       <div class="section-head">
         <div>
+          <p class="section-kicker">Drive</p>
           <h2>走行中モニター</h2>
-          <p class="muted">2台目のiPhoneでこの画面を前面表示したまま使う想定です。現在地の変化に応じて自動再計算します。</p>
+          <p class="muted">現在地に応じて自動再計算し、判断が変わったときだけ音声で知らせます。</p>
         </div>
         <span id="autoStatus" class="badge badge-neutral">停止中</span>
       </div>
@@ -136,96 +166,86 @@
       <div class="monitor-options">
         <label class="voice-toggle">
           <input id="voiceEnabled" type="checkbox" checked />
-          <span>推奨候補が変わったときに音声通知</span>
+          <span>判断が変わったときに音声通知</span>
         </label>
         <button id="voiceTest" class="button secondary compact-button" type="button">音声テスト</button>
       </div>
-      <p id="monitorDetail" class="hint">開始するとGPSを継続取得し、通常は3分または5km移動ごと、切替期限が近いときは1分または1.5km移動ごとに再計算します。</p>
-      <p class="caution">自動監視は実時間専用です。デバッグ用の仮想現在時刻を使う場合は手動で再計算してください。Safariを前面表示した専用端末での利用を推奨します。</p>
+      <p id="monitorDetail" class="hint">開始するとGPSを継続取得して自動更新します。</p>
     </section>
 
-    <section id="resultSection" class="result-section hidden" aria-live="polite">
-      <article id="decisionCard" class="decision-card">
-        <p class="decision-kicker">現在の判断</p>
-        <h2 id="decisionText">—</h2>
-        <p id="decisionSubtext" class="decision-subtext">—</p>
-      </article>
+    <details class="card settings-card">
+      <summary>
+        <span>設定</span>
+        <span class="summary-note">API・音声・デバッグ</span>
+      </summary>
+      <div class="settings-body">
+        <section class="settings-section">
+          <h2>音声</h2>
+          <p class="muted">日本語の女性音声を優先します。端末に利用できる音声が複数ある場合は選択できます。</p>
+          <label class="field full voice-select-field">
+            <span>読み上げ音声</span>
+            <select id="voiceSelect">
+              <option value="auto-female">女性音声を自動選択</option>
+            </select>
+          </label>
+          <p id="voiceStatus" class="hint">端末の日本語音声を確認中…</p>
+        </section>
 
-      <div class="metric-grid">
-        <article class="metric-card">
-          <p class="metric-label">下道優先 ETA</p>
-          <p id="localEta" class="metric-value">—</p>
-          <p id="localDuration" class="metric-note">—</p>
-        </article>
+        <section class="settings-section" id="apiCard">
+          <div class="section-head compact">
+            <div>
+              <h2>Google Maps API</h2>
+              <p class="muted">経路と交通予測に使用します。</p>
+            </div>
+            <span id="apiStatus" class="badge badge-warn">未設定</span>
+          </div>
+          <div class="input-row">
+            <label class="field grow">
+              <span>APIキー</span>
+              <input id="apiKey" type="password" autocomplete="off" placeholder="AIza..." />
+            </label>
+            <button id="saveApiKey" class="button secondary" type="button">保存</button>
+          </div>
+        </section>
 
-        <article class="metric-card">
-          <p class="metric-label">通常ルート ETA</p>
-          <p id="fastEta" class="metric-value">—</p>
-          <p id="fastDuration" class="metric-note">—</p>
-        </article>
+        <section class="settings-section" id="navitimeCard">
+          <div class="section-head compact">
+            <div>
+              <h2>NAVITIME / RapidAPI</h2>
+              <p class="muted">IC検索とETC料金に使用します。</p>
+            </div>
+            <span id="navitimeStatus" class="badge badge-warn">未設定</span>
+          </div>
+          <div class="input-row">
+            <label class="field grow">
+              <span>X-RapidAPI-Key</span>
+              <input id="navitimeApiKey" type="password" autocomplete="off" placeholder="RapidAPIで取得したキー" />
+            </label>
+            <button id="saveNavitimeApiKey" class="button secondary" type="button">保存</button>
+          </div>
+        </section>
 
-        <article class="metric-card accent-card">
-          <p class="metric-label">高速等の効果</p>
-          <p id="timeSaved" class="metric-value">—</p>
-          <p id="tollPrice" class="metric-note">料金 —</p>
-        </article>
-
-        <article class="metric-card accent-card">
-          <p class="metric-label">下道の実質余裕</p>
-          <p id="slack" class="metric-value">—</p>
-          <p class="metric-note">安全マージン込み</p>
-        </article>
+        <details class="developer-details">
+          <summary>開発・診断</summary>
+          <div class="developer-body">
+            <label class="field full debug-time-field">
+              <span>仮想現在時刻</span>
+              <div class="debug-time-row">
+                <label class="debug-check"><input id="useDebugNow" type="checkbox" /> <span>仮想時刻を使う</span></label>
+                <input id="debugNow" type="datetime-local" disabled />
+                <button id="setDebugNowReal" class="button secondary compact-button" type="button">実時間を入力</button>
+              </div>
+            </label>
+            <button id="googleDiag" class="button secondary" type="button">Google APIを診断</button>
+            <pre id="googleDiagResult" class="diagnostic-output hidden" aria-live="polite"></pre>
+            <p class="caution">この領域は開発用です。通常利用では変更する必要はありません。</p>
+          </div>
+        </details>
       </div>
-
-      <article class="switch-card card">
-        <div class="section-head compact">
-          <div>
-            <p class="section-kicker">v0.5.1</p>
-            <h2>高速切替候補</h2>
-            <p id="candidateStatus" class="muted">期限境界と周辺ICを探索しています…</p>
-          </div>
-          <span id="candidateCount" class="badge badge-neutral">—</span>
-        </div>
-
-        <div id="switchSummary" class="switch-summary hidden">
-          <div>
-            <p id="switchModeLabel" class="metric-label">推奨高速入口</p>
-            <p id="switchIc" class="switch-ic">—</p>
-            <p id="switchRoad" class="muted">—</p>
-          </div>
-          <dl class="switch-facts">
-            <div><dt>IC到着予想</dt><dd id="switchArrival">—</dd></div>
-            <div><dt>高速切替期限</dt><dd id="switchDeadline">—</dd></div>
-            <div><dt>期限まで</dt><dd id="switchRemaining">—</dd></div>
-            <div><dt>目的地到着予想</dt><dd id="switchDestinationEta">—</dd></div>
-            <div><dt>高速料金</dt><dd id="switchToll">—</dd></div>
-          </dl>
-        </div>
-
-        <div id="candidateList" class="candidate-list"></div>
-        <p class="caution">IC候補はNAVITIME Route(car) の乗降IC検索から動的取得し、ETAと切替期限はGoogle、ETC料金はNAVITIMEで計算します。実走時の入口案内そのものはYahooカーナビ等で確認してください。</p>
-      </article>
-
-      <article class="card details-card">
-        <div class="section-head compact">
-          <div>
-            <h2>比較詳細</h2>
-            <p id="calculatedAt" class="muted">—</p>
-          </div>
-          <button id="recalculate" class="button secondary" type="button">再計算</button>
-        </div>
-        <dl class="comparison-list">
-          <div><dt>下道優先距離</dt><dd id="localDistance">—</dd></div>
-          <div><dt>通常ルート距離</dt><dd id="fastDistance">—</dd></div>
-          <div><dt>到着期限</dt><dd id="deadlineDisplay">—</dd></div>
-          <div><dt>安全マージン</dt><dd id="marginDisplay">—</dd></div>
-        </dl>
-        <p class="caution">「高速・有料道路を回避」はGoogleの回避指定であり、絶対禁止ではありません。実走前にYahooカーナビ等の経路と照合してください。</p>
-      </article>
-    </section>
+    </details>
 
     <footer>
-      <p>v0.5 — 自動再計算＋候補変更時の音声通知＋実時間補正つき粗密境界探索。運転中の画面操作はしないでください。</p>
+      <p>Deadline Navi v0.6 — 運転中は画面を操作せず、安全な場所で設定してください。</p>
     </footer>
   </main>
 

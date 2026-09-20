@@ -96,6 +96,8 @@
     autoStatus: $('autoStatus'),
     voiceEnabled: $('voiceEnabled'),
     voiceTest: $('voiceTest'),
+    voiceSelect: $('voiceSelect'),
+    voiceStatus: $('voiceStatus'),
     monitorDetail: $('monitorDetail'),
   };
 
@@ -133,8 +135,10 @@
     els.recalculate.addEventListener('click', () => calculate({ source: 'manual' }));
     els.autoStart.addEventListener('click', startAutoMonitor);
     els.autoStop.addEventListener('click', stopAutoMonitor);
-    els.voiceTest.addEventListener('click', () => speakJapanese('音声通知のテストです。'));
+    els.voiceTest.addEventListener('click', () => speakJapanese('音声案内のテストです。現在の設定で読み上げています。'));
     els.voiceEnabled.addEventListener('change', persistFormState);
+    els.voiceSelect?.addEventListener('change', () => { persistFormState(); populateSpeechVoiceOptions(); });
+    setupSpeechVoices();
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
     [els.destination, els.arrivalDeadline, els.safetyMargin, els.debugNow, els.manualOrigin].forEach((el) => {
@@ -162,6 +166,7 @@
       if (saved.debugNow) els.debugNow.value = saved.debugNow;
       if (saved.manualOrigin) els.manualOrigin.value = saved.manualOrigin;
       if (typeof saved.voiceEnabled === 'boolean') els.voiceEnabled.checked = saved.voiceEnabled;
+      if (saved.voiceChoice && els.voiceSelect) els.voiceSelect.dataset.savedChoice = saved.voiceChoice;
     } catch (_) {
       // Ignore malformed local state.
     }
@@ -176,6 +181,7 @@
       debugNow: els.debugNow.value,
       manualOrigin: els.manualOrigin.value.trim(),
       voiceEnabled: Boolean(els.voiceEnabled?.checked),
+      voiceChoice: els.voiceSelect?.value || 'auto-female',
     };
     safeStorageSet(STORAGE_KEY_FORM, JSON.stringify(payload));
   }
@@ -466,21 +472,89 @@
     if (previous.key === next.key) return;
 
     if (next.mode === 'no_toll') {
-      speakJapanese('推奨が更新されました。現在は高速を使わずに到着条件を満たせます。');
+      speakJapanese('判断が変わりました。いまは高速に乗らなくても、到着条件を満たせます。');
       return;
     }
     if (next.mode === 'impossible') {
-      speakJapanese('到着条件が厳しくなりました。通常ルートでも期限を超える見込みです。');
+      speakJapanese('到着条件が厳しくなりました。通常ルートでも、期限を超える見込みです。');
       return;
     }
     if (next.mode === 'candidate' && next.candidate) {
-      const toll = Number.isFinite(next.candidate.toll?.yen) ? `${Math.round(next.candidate.toll.yen)}円` : '料金未取得';
+      const toll = Number.isFinite(next.candidate.toll?.yen) ? `${Math.round(next.candidate.toll.yen)}円` : '料金は確認中';
       const eta = next.candidate.destinationEta instanceof Date ? formatTimeForSpeech(next.candidate.destinationEta) : '';
       const text = previous.mode === 'no_toll'
-        ? `高速利用が必要になりました。現在の推奨入口は${next.candidate.name}、ETC料金${toll}、目的地到着予想${eta}です。`
-        : `推奨高速入口が更新されました。${next.candidate.name}、ETC料金${toll}です。`;
+        ? `高速への切り替えを検討してください。おすすめは、${next.candidate.name}です。ETC料金は${toll}。目的地には、${eta}ごろ到着する見込みです。`
+        : `おすすめの入口が変わりました。${next.candidate.name}です。ETC料金は${toll}。`;
       speakJapanese(text);
     }
+  }
+
+  function setupSpeechVoices() {
+    if (!('speechSynthesis' in window) || !els.voiceSelect) {
+      if (els.voiceStatus) els.voiceStatus.textContent = 'このブラウザでは音声読み上げを利用できません。';
+      return;
+    }
+    const refresh = () => populateSpeechVoiceOptions();
+    refresh();
+    if ('onvoiceschanged' in window.speechSynthesis) {
+      window.speechSynthesis.addEventListener?.('voiceschanged', refresh);
+      window.speechSynthesis.onvoiceschanged = refresh;
+    }
+    setTimeout(refresh, 500);
+    setTimeout(refresh, 1500);
+  }
+
+  function populateSpeechVoiceOptions() {
+    if (!els.voiceSelect || !('speechSynthesis' in window)) return;
+    const voices = (window.speechSynthesis.getVoices?.() || [])
+      .filter((voice) => /^ja(-|_)/i.test(voice.lang));
+    const current = els.voiceSelect.dataset.savedChoice || els.voiceSelect.value || 'auto-female';
+    els.voiceSelect.innerHTML = '';
+    const auto = document.createElement('option');
+    auto.value = 'auto-female';
+    auto.textContent = '女性音声を自動選択';
+    els.voiceSelect.appendChild(auto);
+    for (const voice of voices) {
+      const option = document.createElement('option');
+      option.value = voice.voiceURI || voice.name;
+      option.textContent = `${voice.name}（${voice.lang}）`;
+      els.voiceSelect.appendChild(option);
+    }
+    const valid = [...els.voiceSelect.options].some((opt) => opt.value === current);
+    els.voiceSelect.value = valid ? current : 'auto-female';
+    delete els.voiceSelect.dataset.savedChoice;
+    const selected = chooseJapaneseVoice();
+    if (els.voiceStatus) {
+      els.voiceStatus.textContent = selected
+        ? `使用予定：${selected.name}。端末側の高品質音声が利用できる場合はそちらを優先します。`
+        : '日本語音声を取得できませんでした。端末の音声設定を確認してください。';
+    }
+  }
+
+  function chooseJapaneseVoice() {
+    if (!('speechSynthesis' in window)) return null;
+    const voices = (window.speechSynthesis.getVoices?.() || [])
+      .filter((voice) => /^ja(-|_)/i.test(voice.lang));
+    if (!voices.length) return null;
+    const selectedValue = els.voiceSelect?.value || 'auto-female';
+    if (selectedValue !== 'auto-female') {
+      const selected = voices.find((voice) => (voice.voiceURI || voice.name) === selectedValue);
+      if (selected) return selected;
+    }
+    const preferredFemaleNames = ['Kyoko', 'Nanami', 'Sakura', 'Hina', 'Ayumi', 'Nozomi'];
+    const maleNames = ['Otoya', 'Hattori'];
+    return [...voices].sort((a, b) => {
+      const score = (voice) => {
+        let value = 0;
+        if (preferredFemaleNames.some((name) => voice.name.toLowerCase().includes(name.toLowerCase()))) value += 100;
+        if (maleNames.some((name) => voice.name.toLowerCase().includes(name.toLowerCase()))) value -= 100;
+        if (voice.localService) value += 10;
+        if (/premium|enhanced|siri/i.test(`${voice.name} ${voice.voiceURI}`)) value += 30;
+        if (/compact/i.test(voice.voiceURI || '')) value -= 4;
+        return value;
+      };
+      return score(b) - score(a);
+    })[0];
   }
 
   function speakJapanese(text) {
@@ -492,10 +566,11 @@
       window.speechSynthesis.cancel();
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.lang = 'ja-JP';
-      utterance.rate = 0.95;
-      const voices = window.speechSynthesis.getVoices?.() || [];
-      const jaVoice = voices.find((voice) => /^ja(-|_)/i.test(voice.lang));
-      if (jaVoice) utterance.voice = jaVoice;
+      utterance.rate = 0.90;
+      utterance.pitch = 1.03;
+      utterance.volume = 1.0;
+      const voice = chooseJapaneseVoice();
+      if (voice) utterance.voice = voice;
       window.speechSynthesis.speak(utterance);
     } catch (error) {
       console.warn('speechSynthesis failed:', error);
