@@ -92,6 +92,7 @@
           <div><dt>IC到着予想</dt><dd id="switchArrival">—</dd></div>
           <div><dt>高速切替期限</dt><dd id="switchDeadline">—</dd></div>
           <div><dt>期限まで</dt><dd id="switchRemaining">—</dd></div>
+          <div><dt>ナビ変更目安</dt><dd id="navChangeAdvice">—</dd></div>
         </dl>
       </article>
 
@@ -153,7 +154,7 @@
         <div>
           <p class="section-kicker">Drive</p>
           <h2>走行中モニター</h2>
-          <p class="muted">現在地に応じて自動再計算し、判断が変わったときだけ音声で知らせます。</p>
+          <p class="muted">現在地に応じて自動再計算し、推奨入口とナビを切り替えるタイミングを音声で知らせます。</p>
         </div>
         <span id="autoStatus" class="badge badge-neutral">停止中</span>
       </div>
@@ -166,7 +167,7 @@
       <div class="monitor-options">
         <label class="voice-toggle">
           <input id="voiceEnabled" type="checkbox" checked />
-          <span>判断が変わったときに音声通知</span>
+          <span>推奨入口とナビ変更時機を音声通知</span>
         </label>
         <button id="voiceTest" class="button secondary compact-button" type="button">音声テスト</button>
       </div>
@@ -245,7 +246,7 @@
     </details>
 
     <footer>
-      <p>Deadline Navi v0.6 — 運転中は画面を操作せず、安全な場所で設定してください。</p>
+      <p>Deadline Navi v0.6.1 — 運転中は画面を操作せず、安全な場所で設定してください。</p>
     </footer>
   </main>
 

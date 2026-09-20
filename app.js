@@ -10,6 +10,10 @@
   const AUTO_URGENT_DISTANCE_M = 1_500;
   const AUTO_MIN_INTERVAL_MS = 45_000;
   const AUTO_URGENT_THRESHOLD_MS = 30 * 60_000;
+  const NAV_GUIDANCE_RECALC_MS = 5 * 60_000;
+  const NAV_GUIDANCE_SAMPLE_COUNT = 6;
+  const NAV_GUIDANCE_PREPARE_MS = 15 * 60_000;
+  const NAV_GUIDANCE_NOW_MS = 5 * 60_000;
   const NAVITIME_HOST = 'navitime-route-car.p.rapidapi.com';
   const NAVITIME_ROUTE_URL = `https://${NAVITIME_HOST}/route_car`;
   const NAVITIME_IC_URL = `https://${NAVITIME_HOST}/ic`;
@@ -89,6 +93,7 @@
     switchArrival: $('switchArrival'),
     switchDeadline: $('switchDeadline'),
     switchRemaining: $('switchRemaining'),
+    navChangeAdvice: $('navChangeAdvice'),
     switchDestinationEta: $('switchDestinationEta'),
     switchToll: $('switchToll'),
     autoStart: $('autoStart'),
@@ -430,8 +435,14 @@
 
   function currentAutoPolicy() {
     let urgent = false;
-    if (lastDecisionSnapshot?.mode === 'candidate' && lastDecisionSnapshot.candidate?.switchDeadline) {
-      urgent = lastDecisionSnapshot.candidate.switchDeadline.getTime() - Date.now() <= AUTO_URGENT_THRESHOLD_MS;
+    if (lastDecisionSnapshot?.mode === 'candidate') {
+      const switchRemaining = lastDecisionSnapshot.candidate?.switchDeadline
+        ? lastDecisionSnapshot.candidate.switchDeadline.getTime() - Date.now()
+        : Infinity;
+      const navRemaining = lastDecisionSnapshot.candidate?.navGuidance?.changeBy instanceof Date
+        ? lastDecisionSnapshot.candidate.navGuidance.changeBy.getTime() - Date.now()
+        : Infinity;
+      urgent = Math.min(switchRemaining, navRemaining) <= AUTO_URGENT_THRESHOLD_MS;
     } else if (lastDecisionSnapshot?.mode === 'no_toll' && Number.isFinite(lastDecisionSnapshot.localSlackMs)) {
       urgent = lastDecisionSnapshot.localSlackMs <= AUTO_URGENT_THRESHOLD_MS;
     }
@@ -456,7 +467,7 @@
     const mode = policy.urgent ? '期限接近モード' : '通常モード';
     els.autoStatus.textContent = message || `監視中・${mode}`;
     els.monitorDetail.textContent = autoMonitor.lastCalcAt
-      ? `次の時間再計算まで約${Math.max(0, Math.ceil(remainMs / 60_000))}分。推奨候補が変わったときだけ音声通知します。`
+      ? `次の時間再計算まで約${Math.max(0, Math.ceil(remainMs / 60_000))}分。推奨候補の変更や、ナビ変更の目安が近づいたときに音声通知します。`
       : '最初のGPS取得後に自動計算します。';
   }
 
@@ -468,11 +479,26 @@
 
   function maybeNotifyDecisionChange(previous, next) {
     if (!els.voiceEnabled?.checked || !next || next.mode === 'error' || next.mode === 'incomplete') return;
-    if (!previous) return;
-    if (previous.key === next.key) return;
+
+    if (!previous) {
+      if (next.mode === 'no_toll') {
+        speakJapanese('現在は高速に乗らなくても、到着条件を満たせます。そのまま走って大丈夫です。');
+      } else if (next.mode === 'impossible') {
+        speakJapanese('現在の交通状況では、通常ルートでも到着期限を超える見込みです。');
+      } else if (next.mode === 'candidate' && next.candidate) {
+        speakJapanese(buildCandidateVoiceMessage(next.candidate, 'initial'));
+      }
+      return;
+    }
+
+    const keyChanged = previous.key !== next.key;
+    const previousLevel = previous.candidate?.navGuidance?.level || null;
+    const nextLevel = next.candidate?.navGuidance?.level || null;
+    const navLevelChanged = !keyChanged && previousLevel !== nextLevel;
+    if (!keyChanged && !navLevelChanged) return;
 
     if (next.mode === 'no_toll') {
-      speakJapanese('判断が変わりました。いまは高速に乗らなくても、到着条件を満たせます。');
+      speakJapanese('判断が変わりました。いまは高速に乗らなくても、到着条件を満たせます。そのまま走って大丈夫です。');
       return;
     }
     if (next.mode === 'impossible') {
@@ -480,13 +506,61 @@
       return;
     }
     if (next.mode === 'candidate' && next.candidate) {
-      const toll = Number.isFinite(next.candidate.toll?.yen) ? `${Math.round(next.candidate.toll.yen)}円` : '料金は確認中';
-      const eta = next.candidate.destinationEta instanceof Date ? formatTimeForSpeech(next.candidate.destinationEta) : '';
-      const text = previous.mode === 'no_toll'
-        ? `高速への切り替えを検討してください。おすすめは、${next.candidate.name}です。ETC料金は${toll}。目的地には、${eta}ごろ到着する見込みです。`
-        : `おすすめの入口が変わりました。${next.candidate.name}です。ETC料金は${toll}。`;
-      speakJapanese(text);
+      if (keyChanged) {
+        speakJapanese(buildCandidateVoiceMessage(next.candidate, previous.mode === 'no_toll' ? 'required' : 'changed'));
+      } else if (navLevelChanged) {
+        speakJapanese(buildNavUrgencyVoiceMessage(next.candidate));
+      }
     }
+  }
+
+  function buildCandidateVoiceMessage(candidate, context = 'changed') {
+    const toll = Number.isFinite(candidate.toll?.yen) ? `${Math.round(candidate.toll.yen)}円` : '料金は確認中です';
+    const eta = candidate.destinationEta instanceof Date ? formatTimeForSpeech(candidate.destinationEta) : '';
+    const prefix = context === 'initial'
+      ? `現在のおすすめは、${candidate.name}です。`
+      : context === 'required'
+        ? `高速への切り替えが必要です。おすすめは、${candidate.name}です。`
+        : `おすすめの入口が、${candidate.name}に変わりました。`;
+    const action = buildNavActionVoice(candidate);
+    const etaText = eta ? `目的地には、${eta}ごろ到着する見込みです。` : '';
+    return `${prefix}ETC料金は${toll}。${action}${etaText}`;
+  }
+
+  function buildNavActionVoice(candidate) {
+    const guidance = candidate.navGuidance;
+    const switchTime = candidate.switchDeadline instanceof Date ? formatTimeForSpeech(candidate.switchDeadline) : '';
+    if (!guidance || !(guidance.changeBy instanceof Date)) {
+      return switchTime
+        ? `安全のため、早めにカーナビを${candidate.name}へ変更してください。${candidate.name}には、${switchTime}ごろまでに入る必要があります。`
+        : `安全のため、早めにカーナビを${candidate.name}へ変更してください。`;
+    }
+    const remainingMs = guidance.changeBy.getTime() - Date.now();
+    const remainingMin = Math.max(0, Math.round(remainingMs / 60_000));
+    const changeTime = formatTimeForSpeech(guidance.changeBy);
+    if (guidance.level === 'now') {
+      return switchTime
+        ? `今すぐカーナビを${candidate.name}に変更してください。${candidate.name}には、${switchTime}ごろまでに入る必要があります。`
+        : `今すぐカーナビを${candidate.name}に変更してください。`;
+    }
+    if (guidance.level === 'prepare') {
+      return `まだ現在のルートを走れますが、ナビ変更の目安まであと約${remainingMin}分です。${changeTime}ごろまでに、${candidate.name}へ向かう設定に変更してください。`;
+    }
+    return `今はそのまま走って大丈夫です。カーナビを${candidate.name}に変更する目安は、あと約${remainingMin}分、${changeTime}ごろです。`;
+  }
+
+  function buildNavUrgencyVoiceMessage(candidate) {
+    const guidance = candidate.navGuidance;
+    if (!guidance) return '';
+    if (guidance.level === 'now') {
+      return `今すぐカーナビを${candidate.name}に変更してください。${candidate.name}へ向かってください。`;
+    }
+    if (guidance.level === 'prepare') {
+      const remainingMs = guidance.changeBy instanceof Date ? guidance.changeBy.getTime() - Date.now() : 0;
+      const remainingMin = Math.max(0, Math.round(remainingMs / 60_000));
+      return `${candidate.name}へ向かう準備をしてください。ナビ変更の目安まで、あと約${remainingMin}分です。`;
+    }
+    return '';
   }
 
   function setupSpeechVoices() {
@@ -747,11 +821,42 @@
         return snapshot;
       }
 
-      const selected = candidateResult?.selected || null;
+      let selected = candidateResult?.selected || null;
       if (selected) {
+        const selectedKey = `IC:${selected.navitimeIcId || selected.id || selected.name}`;
+        const previousGuidance = lastDecisionSnapshot?.key === selectedKey
+          ? lastDecisionSnapshot.candidate?.navGuidance
+          : null;
+        const previousAgeMs = previousGuidance?.computedAt instanceof Date
+          ? now.getTime() - previousGuidance.computedAt.getTime()
+          : Infinity;
+        const previousRemainingMs = previousGuidance?.changeBy instanceof Date
+          ? previousGuidance.changeBy.getTime() - now.getTime()
+          : Infinity;
+        const shouldRecomputeGuidance = source !== 'auto'
+          || !previousGuidance
+          || (previousRemainingMs <= AUTO_URGENT_THRESHOLD_MS && previousAgeMs >= NAV_GUIDANCE_RECALC_MS);
+        try {
+          if (shouldRecomputeGuidance) {
+            selected = await enrichNavigationGuidance({
+              Route,
+              RouteMatrix,
+              origin,
+              candidate: selected,
+              now,
+              localRoute,
+            });
+          } else {
+            selected = { ...selected, navGuidance: refreshNavGuidance(previousGuidance, now) };
+          }
+        } catch (guidanceError) {
+          console.warn('Navigation guidance estimation failed:', guidanceError);
+          selected = { ...selected, navGuidance: fallbackNavGuidance(selected, now) };
+        }
+        renderSwitchSummary(selected, now, practicalDeadline);
         snapshot = {
           mode: 'candidate',
-          key: `IC:${selected.navitimeIcId || selected.id || selected.name}`,
+          key: selectedKey,
           now,
           practicalDeadline,
           localEta,
@@ -1471,6 +1576,125 @@
     };
   }
 
+  function navGuidanceLevel(remainingMs) {
+    if (!Number.isFinite(remainingMs) || remainingMs <= NAV_GUIDANCE_NOW_MS) return 'now';
+    if (remainingMs <= NAV_GUIDANCE_PREPARE_MS) return 'prepare';
+    return 'later';
+  }
+
+  function refreshNavGuidance(guidance, now) {
+    if (!guidance || !(guidance.changeBy instanceof Date)) return guidance;
+    const remainingMs = guidance.changeBy.getTime() - now.getTime();
+    return { ...guidance, remainingMs, level: navGuidanceLevel(remainingMs) };
+  }
+
+  function fallbackNavGuidance(candidate, now) {
+    const entrySlackMs = candidate?.switchDeadline instanceof Date && candidate?.icArrival instanceof Date
+      ? candidate.switchDeadline.getTime() - candidate.icArrival.getTime()
+      : 0;
+    const conservativeMs = Math.max(0, Math.min(entrySlackMs * 0.5, 20 * 60_000));
+    const changeBy = new Date(now.getTime() + conservativeMs);
+    return {
+      changeBy,
+      remainingMs: conservativeMs,
+      level: navGuidanceLevel(conservativeMs),
+      computedAt: new Date(now),
+      method: 'fallback',
+    };
+  }
+
+  async function enrichNavigationGuidance({ Route, RouteMatrix, origin, candidate, now, localRoute }) {
+    const routePath = normalizeRoutePath(localRoute?.path);
+    if (routePath.length < 2 || !(candidate.switchDeadline instanceof Date)) {
+      return { ...candidate, navGuidance: fallbackNavGuidance(candidate, now) };
+    }
+
+    const cumulative = cumulativePathDistances(routePath);
+    const routeTotal = cumulative.at(-1) || 0;
+    const candidateProgress = Number.isFinite(candidate.routeProgressMeters)
+      ? candidate.routeProgressMeters
+      : Math.min(routeTotal, Number(candidate.localDistanceMeters || 0));
+    const searchEnd = Math.min(routeTotal, Math.max(candidateProgress + 35_000, candidateProgress * 1.15, 35_000));
+    if (!(searchEnd > 1_000)) return { ...candidate, navGuidance: fallbackNavGuidance(candidate, now) };
+
+    const sampleCandidates = [];
+    for (let i = 1; i <= NAV_GUIDANCE_SAMPLE_COUNT; i += 1) {
+      const progress = searchEnd * (i / NAV_GUIDANCE_SAMPLE_COUNT);
+      const waypoint = interpolatePathAtDistance(routePath, cumulative, progress);
+      if (!waypoint) continue;
+      sampleCandidates.push({
+        id: `nav-guidance-${i}`,
+        name: `走行継続${i}`,
+        waypoint,
+        routeProgressMeters: progress,
+      });
+    }
+
+    const timedSamples = await attachLocalMatrix(RouteMatrix, origin, sampleCandidates, now);
+    const evaluated = await mapWithConcurrency(timedSamples.filter((item) => item.exists && item.localDurationMs > 0), 4, async (sample) => {
+      const departureAtSample = new Date(now.getTime() + sample.localDurationMs);
+      const localToIc = await computeLocalLeg(Route, sample.waypoint, candidate.waypoint, departureAtSample);
+      const toIcMs = Number(localToIc?.durationMillis || 0);
+      if (!toIcMs) return { ...sample, safeForIc: false, arrivalAtIc: null };
+      const arrivalAtIc = new Date(departureAtSample.getTime() + toIcMs);
+      return {
+        ...sample,
+        departureAtSample,
+        toIcMs,
+        arrivalAtIc,
+        safeForIc: arrivalAtIc <= candidate.switchDeadline,
+      };
+    });
+
+    const safeSamples = evaluated.filter((item) => item.safeForIc).sort((a, b) => a.routeProgressMeters - b.routeProgressMeters);
+    if (!safeSamples.length) {
+      return {
+        ...candidate,
+        navGuidance: {
+          changeBy: new Date(now),
+          remainingMs: 0,
+          level: 'now',
+          computedAt: new Date(now),
+          method: 'route-sampling',
+        },
+      };
+    }
+
+    const latestSafe = safeSamples.at(-1);
+    const changeBy = new Date(now.getTime() + latestSafe.localDurationMs);
+    const remainingMs = changeBy.getTime() - now.getTime();
+    return {
+      ...candidate,
+      navGuidance: {
+        changeBy,
+        remainingMs,
+        level: navGuidanceLevel(remainingMs),
+        computedAt: new Date(now),
+        method: 'route-sampling',
+        sampledProgressMeters: latestSafe.routeProgressMeters,
+      },
+    };
+  }
+
+  async function computeLocalLeg(Route, origin, destination, departureTime) {
+    const request = {
+      origin,
+      destination,
+      travelMode: 'DRIVING',
+      routingPreference: 'TRAFFIC_AWARE',
+      language: 'ja',
+      fields: ['durationMillis', 'distanceMeters'],
+      routeModifiers: {
+        avoidHighways: true,
+        avoidTolls: true,
+        avoidFerries: true,
+      },
+    };
+    applyFutureDepartureTime(request, departureTime);
+    const result = await Route.computeRoutes(request);
+    return result.routes?.[0] || null;
+  }
+
   async function adaptiveBoundarySearch({
     Route,
     candidates,
@@ -1992,6 +2216,17 @@
     els.switchArrival.textContent = formatMoment(candidate.icArrival, now);
     els.switchDeadline.textContent = `≈ ${formatMoment(candidate.switchDeadline, now)}`;
     els.switchRemaining.textContent = remainingMs >= 0 ? formatDuration(remainingMs) : `超過 ${formatDuration(Math.abs(remainingMs))}`;
+    if (els.navChangeAdvice) {
+      const guidance = candidate.navGuidance;
+      if (guidance?.changeBy instanceof Date) {
+        const navRemainingMs = guidance.changeBy.getTime() - now.getTime();
+        els.navChangeAdvice.textContent = guidance.level === 'now'
+          ? '今すぐ変更'
+          : `${formatMoment(guidance.changeBy, now)}（あと約${formatDuration(Math.max(0, navRemainingMs))}）`;
+      } else {
+        els.navChangeAdvice.textContent = '早めに変更';
+      }
+    }
     els.switchDestinationEta.textContent = formatMoment(candidate.destinationEta, now);
     els.switchToll.textContent = formatToll(candidate);
     els.switchSummary.classList.remove('hidden');
