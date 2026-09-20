@@ -1,10 +1,12 @@
-# GitHub Pages への更新手順（v0.6）
+# GitHub Pages への更新手順（v0.6.2）
 
-1. GitHub の `deadline-nav` リポジトリを開く
-2. `Add file` → `Upload files`
-3. このフォルダの中身をアップロードして既存ファイルを更新
-4. Commit message に `Update to v0.6` などと入力
-5. `main` ブランチへ Commit
-6. 数分後に `https://aspara0704.github.io/deadline-nav/?v=060` を開いて確認
+GitHub Desktopを使う場合：
 
-Google APIキーとRapidAPIキーはリポジトリへ書き込まないでください。既に各端末のブラウザへ保存したキーは、同じ公開URLであれば通常そのまま利用できます。
+1. このフォルダの中身を、Mac上の `deadline-nav` リポジトリへ上書きコピー
+2. GitHub Desktopの Changes で変更内容を確認
+3. Summary に `Update to v0.6.2 product copy` などと入力
+4. `Commit to main`
+5. `Push origin`
+6. 数分後に `https://aspara0704.github.io/deadline-nav/?v=062` を開いて確認
+
+Google APIキーとRapidAPIキーはリポジトリへ書き込まないでください。

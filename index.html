@@ -17,9 +17,10 @@
     <header class="topbar">
       <div>
         <p class="brand-kicker">Deadline Navi</p>
-        <h1>到着時刻から、いちばん安い高速切替を。</h1>
+        <h1>間に合うなら、まだ下道で。</h1>
+        <p class="brand-description">Deadline Naviは、高速道路へ切り替える最適なタイミングをリアルタイムに判断します。</p>
       </div>
-      <span class="version-chip">v0.6</span>
+      <span class="version-chip">v0.6.2</span>
     </header>
 
     <section class="card trip-card">
@@ -103,12 +104,12 @@
           <p id="localDuration" class="metric-note">—</p>
         </article>
         <article class="metric-card">
-          <p class="metric-label">通常ルート到着</p>
+          <p class="metric-label">Google推奨ルート</p>
           <p id="fastEta" class="metric-value">—</p>
           <p id="fastDuration" class="metric-note">—</p>
         </article>
         <article class="metric-card accent-card">
-          <p class="metric-label">高速の時間効果</p>
+          <p class="metric-label">高速の時短効果</p>
           <p id="timeSaved" class="metric-value">—</p>
           <p id="tollPrice" class="metric-note">料金 —</p>
         </article>
@@ -125,10 +126,11 @@
           <div class="section-head compact">
             <div>
               <h2>高速切替候補</h2>
-              <p id="candidateStatus" class="muted">期限境界と周辺ICを探索しています…</p>
+              <p class="muted">到着条件を満たす有力な候補を比較します。</p>
             </div>
-            <span id="candidateCount" class="badge badge-neutral">—</span>
           </div>
+          <p id="candidateStatus" class="hidden" aria-hidden="true"></p>
+          <span id="candidateCount" class="hidden" aria-hidden="true">—</span>
           <div id="candidateList" class="candidate-list"></div>
 
           <div class="details-divider"></div>
@@ -140,8 +142,8 @@
             <button id="recalculate" class="button secondary compact-button" type="button">再計算</button>
           </div>
           <dl class="comparison-list">
-            <div><dt>下道優先距離</dt><dd id="localDistance">—</dd></div>
-            <div><dt>通常ルート距離</dt><dd id="fastDistance">—</dd></div>
+            <div><dt>下道ルート距離</dt><dd id="localDistance">—</dd></div>
+            <div><dt>Google推奨ルート距離</dt><dd id="fastDistance">—</dd></div>
             <div><dt>到着期限</dt><dd id="deadlineDisplay">—</dd></div>
             <div><dt>安全マージン</dt><dd id="marginDisplay">—</dd></div>
           </dl>
@@ -177,7 +179,7 @@
     <details class="card settings-card">
       <summary>
         <span>設定</span>
-        <span class="summary-note">API・音声・デバッグ</span>
+        <span class="summary-note">音声・API</span>
       </summary>
       <div class="settings-body">
         <section class="settings-section">
@@ -246,7 +248,7 @@
     </details>
 
     <footer>
-      <p>Deadline Navi v0.6.1 — 運転中は画面を操作せず、安全な場所で設定してください。</p>
+      <p>Deadline Navi v0.6.2 — 運転中は画面を操作せず、安全な場所で設定してください。</p>
     </footer>
   </main>
 

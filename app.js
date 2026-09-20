@@ -484,7 +484,7 @@
       if (next.mode === 'no_toll') {
         speakJapanese('現在は高速に乗らなくても、到着条件を満たせます。そのまま走って大丈夫です。');
       } else if (next.mode === 'impossible') {
-        speakJapanese('現在の交通状況では、通常ルートでも到着期限を超える見込みです。');
+        speakJapanese('現在の交通状況では、Google推奨ルートでも到着期限を超える見込みです。');
       } else if (next.mode === 'candidate' && next.candidate) {
         speakJapanese(buildCandidateVoiceMessage(next.candidate, 'initial'));
       }
@@ -502,7 +502,7 @@
       return;
     }
     if (next.mode === 'impossible') {
-      speakJapanese('到着条件が厳しくなりました。通常ルートでも、期限を超える見込みです。');
+      speakJapanese('到着条件が厳しくなりました。Google推奨ルートでも、期限を超える見込みです。');
       return;
     }
     if (next.mode === 'candidate' && next.candidate) {
@@ -767,7 +767,7 @@
 
       if (normalEta > practicalDeadline) {
         els.candidateCount.textContent = '期限困難';
-        els.candidateStatus.textContent = 'Googleの通常ルートでも安全マージン込みの到着期限を超える見込みです。高速入口を変えても同じ経路エンジン上では期限達成を保証できないため、料金探索を省略しました。';
+        els.candidateStatus.textContent = 'Google推奨ルートでも安全マージン込みの到着期限を超える見込みです。高速入口を変えても同じ経路エンジン上では期限達成を保証できないため、料金探索を省略しました。';
         els.switchSummary.classList.add('hidden');
         snapshot = {
           mode: 'impossible',
@@ -816,6 +816,7 @@
       } catch (candidateError) {
         console.error('Candidate evaluation failed:', candidateError);
         els.candidateStatus.textContent = `候補評価のみ失敗しました：${String(candidateError?.message || candidateError)}`;
+        showError('高速切替候補の計算に失敗しました。通信状況を確認して、再計算してください。');
         snapshot = { mode: 'error', key: 'CANDIDATE_ERROR', now, practicalDeadline, localEta, localSlackMs, candidate: null };
         finalizeCalculationSnapshot(snapshot, source);
         return snapshot;
@@ -2179,11 +2180,8 @@
       const note = document.createElement('p');
       note.className = 'candidate-note';
       const effect = candidate.timeSavedMs > 0 ? `下道のみより ${formatDuration(candidate.timeSavedMs)}短縮` : '下道のみと大差なし';
-      const fareNote = candidate.navitimeFareError ? ` / 料金取得: ${candidate.navitimeFareError}` : '';
-      const corridorNote = Number.isFinite(candidate.corridorDistanceMeters)
-        ? ` / 下道ルートから約${formatDistance(candidate.corridorDistanceMeters)}`
-        : '';
-      note.textContent = `ICまで下道 ${formatDuration(candidate.localDurationMs)}・${formatDistance(candidate.localDistanceMeters)} / ${effect}${corridorNote}${fareNote}`;
+      const fareNote = candidate.navitimeFareError ? ' / ETC料金は取得できませんでした' : '';
+      note.textContent = `ICまで下道 ${formatDuration(candidate.localDurationMs)}・${formatDistance(candidate.localDistanceMeters)} / ${effect}${fareNote}`;
 
       article.append(top, grid, note);
       els.candidateList.append(article);
@@ -2443,10 +2441,7 @@
     els.fastDistance.textContent = formatDistance(normalRoute.distanceMeters);
     els.deadlineDisplay.textContent = formatDateTime(deadline);
     els.marginDisplay.textContent = `${safetyMarginMin}分`;
-    const debugSuffix = reference?.simulated
-      ? (reference.trafficMode === 'future' ? '（仮想時刻・Google将来交通予測）' : '（仮想時刻・交通情報は現在値）')
-      : '（実時間）';
-    els.calculatedAt.textContent = `${formatDateTime(now)} を現在時刻として計算 ${debugSuffix}`;
+    els.calculatedAt.textContent = `最終更新 ${formatMoment(now, new Date())}`;
 
     updateDecision({ slackMs, normalEta, practicalDeadline, timeSavedMs });
 
@@ -2461,7 +2456,7 @@
     els.candidateList.replaceChildren();
     els.switchModeLabel.textContent = '現在の最安案';
     els.switchIc.textContent = '高速に乗らない';
-    els.switchRoad.textContent = '下道優先ルートを継続';
+    els.switchRoad.textContent = '下道ルートを継続';
     els.switchArrival.textContent = '—';
     els.switchDeadline.textContent = 'まだ不要';
     els.switchRemaining.textContent = formatDuration(Math.max(0, slackMs));
@@ -2476,29 +2471,27 @@
     const minutes = slackMs / 60_000;
     if (minutes >= 20) {
       els.decisionCard.classList.add('good');
-      els.decisionText.textContent = '下道継続で余裕あり';
       els.decisionText.textContent = '高速不要：下道が最安';
       els.decisionSubtext.textContent = `安全マージン込みでも約${Math.floor(minutes)}分の余裕があります。到着期限を守りつつ追加料金を最小化するなら、高速料金0円の下道継続が最適です。`;
     } else if (minutes >= 0) {
       els.decisionCard.classList.add('warn');
-      els.decisionText.textContent = '下道継続は可能、要注意';
       els.decisionText.textContent = '高速不要：ただし余裕は小さい';
       els.decisionSubtext.textContent = `安全マージン込みの余裕は約${Math.max(0, Math.floor(minutes))}分です。現時点の最小追加料金は0円ですが、自動再計算で余裕の減少を監視するのが適切です。`;
     } else if (normalEta <= practicalDeadline) {
       els.decisionCard.classList.add('danger');
       els.decisionText.textContent = '高速への切替を検討';
-      els.decisionSubtext.textContent = `下道優先では安全余裕を割り込みます。通常ルートなら条件内です。高速等の効果は約${formatDuration(timeSavedMs)}です。`;
+      els.decisionSubtext.textContent = `下道ルートでは安全余裕を割り込みます。Google推奨ルートなら条件内です。高速の時短効果は約${formatDuration(timeSavedMs)}です。`;
     } else {
       els.decisionCard.classList.add('danger');
-      els.decisionText.textContent = '通常ルートでも期限が厳しい';
-      els.decisionSubtext.textContent = '現在の交通状況では、通常ルートでも安全マージン込みの到着期限を超える見込みです。';
+      els.decisionText.textContent = 'Google推奨ルートでも期限が厳しい';
+      els.decisionSubtext.textContent = '現在の交通状況では、Google推奨ルートでも安全マージン込みの到着期限を超える見込みです。';
     }
   }
 
   async function updateNormalNavitimeFare(normalRoute, departureTime, apiKey) {
     const endpoints = routeEndpoints(normalRoute);
     if (!endpoints?.start || !endpoints?.goal) {
-      throw new Error('通常ルートの座標を取得できませんでした。');
+      throw new Error('Google推奨ルートの座標を取得できませんでした。');
     }
     const fare = await fetchNavitimeEtcFare({
       apiKey,

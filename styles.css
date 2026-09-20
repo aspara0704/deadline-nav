@@ -295,3 +295,15 @@ body { background: #f4f6fa; }
   .switch-highlight { grid-template-columns:1fr; }
   .summary-note { display:none; }
 }
+
+/* v0.6.2 copy and product polish */
+.brand-description {
+  margin: 10px 0 0;
+  max-width: 620px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.6;
+}
+@media (max-width: 560px) {
+  .brand-description { font-size: 13px; }
+}
