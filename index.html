@@ -8,13 +8,13 @@
   <meta name="apple-mobile-web-app-title" content="Deadline Navi" />
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="apple-touch-icon" href="apple-touch-icon.png" />
-  <title>Deadline Navi v0.5</title>
+  <title>Deadline Navi v0.5.1</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <main class="app-shell">
     <header class="hero">
-      <p class="eyebrow">Prototype v0.5</p>
+      <p class="eyebrow">Prototype v0.5.1</p>
       <h1>Deadline Navi</h1>
       <p class="lead">「締切を守りつつ、どのICから高速に乗ると最も安い？」を計算します。</p>
     </header>
@@ -35,6 +35,10 @@
         <button id="saveApiKey" class="button secondary" type="button">保存</button>
       </div>
       <p class="hint">Maps JavaScript API と Routes API を有効化したキーを使用してください。</p>
+      <div class="monitor-actions">
+        <button id="googleDiag" class="button secondary" type="button">Google APIを診断</button>
+      </div>
+      <pre id="googleDiagResult" class="diagnostic-output hidden" aria-live="polite"></pre>
     </section>
 
     <section class="card" id="navitimeCard">
@@ -107,7 +111,7 @@
       </div>
 
       <div class="preset-note">
-        <strong>v0.5 実時間補正つき粗密探索：</strong>まず下道だけで締切を守れるか判定し、守れる場合は追加料金0円で終了します。高速が必要な場合は、ルート上の仮想地点を各地点への実際の到着予想時刻で評価し、期限境界を特定。その周辺の実在ICを粗密探索し、期限直前の候補を必ず料金比較します。
+        <strong>v0.5.1 実時間補正つき粗密探索：</strong>まず下道だけで締切を守れるか判定し、守れる場合は追加料金0円で終了します。高速が必要な場合は、ルート上の仮想地点を各地点への実際の到着予想時刻で評価し、期限境界を特定。その周辺の実在ICを粗密探索し、期限直前の候補を必ず料金比較します。
       </div>
 
       <button id="calculate" class="button primary wide" type="button">現在の判断を計算</button>
@@ -176,7 +180,7 @@
       <article class="switch-card card">
         <div class="section-head compact">
           <div>
-            <p class="section-kicker">v0.5</p>
+            <p class="section-kicker">v0.5.1</p>
             <h2>高速切替候補</h2>
             <p id="candidateStatus" class="muted">期限境界と周辺ICを探索しています…</p>
           </div>

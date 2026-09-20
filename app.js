@@ -46,6 +46,8 @@
     apiKey: $('apiKey'),
     saveApiKey: $('saveApiKey'),
     apiStatus: $('apiStatus'),
+    googleDiag: $('googleDiag'),
+    googleDiagResult: $('googleDiagResult'),
     navitimeApiKey: $('navitimeApiKey'),
     saveNavitimeApiKey: $('saveNavitimeApiKey'),
     navitimeStatus: $('navitimeStatus'),
@@ -122,6 +124,7 @@
     refreshNavitimeStatus();
 
     els.saveApiKey.addEventListener('click', saveApiKey);
+    els.googleDiag?.addEventListener('click', diagnoseGoogleApi);
     els.saveNavitimeApiKey.addEventListener('click', saveNavitimeApiKey);
     els.getLocation.addEventListener('click', requestLocation);
     els.useDebugNow.addEventListener('change', () => { updateDebugControls(); persistFormState(); });
@@ -1932,6 +1935,110 @@
     return manual || null;
   }
 
+  async function diagnoseGoogleApi() {
+    const key = getApiKey();
+    const box = els.googleDiagResult;
+    if (!box) return;
+    box.classList.remove('hidden');
+    if (!key) {
+      box.textContent = '診断: Google Maps APIキーが未設定です。';
+      return;
+    }
+
+    const lines = [
+      'Deadline Navi Google API 診断',
+      `ページURL: ${location.href}`,
+      `Origin: ${location.origin}`,
+      `APIキー: ${maskKey(key)}`,
+      `オンライン: ${navigator.onLine ? 'yes' : 'no'}`,
+    ];
+    box.textContent = `${lines.join('\n')}\n\n診断中…`;
+    els.googleDiag.disabled = true;
+
+    const captured = [];
+    const originalConsoleError = console.error;
+    const captureConsoleError = (...args) => {
+      try { captured.push(args.map((x) => String(x)).join(' ')); } catch (_) { /* no-op */ }
+      originalConsoleError.apply(console, args);
+    };
+    console.error = captureConsoleError;
+
+    const errorEvents = [];
+    const onWindowError = (event) => {
+      const msg = event?.message || event?.error?.message;
+      if (msg) errorEvents.push(String(msg));
+    };
+    window.addEventListener('error', onWindowError);
+
+    try {
+      lines.push('');
+      lines.push('1) Maps JavaScript API / Routes Library 読み込み…');
+      box.textContent = lines.join('\n');
+      const { Route } = await loadGoogleRoutes(key);
+      lines.push('   OK: routes library loaded');
+
+      lines.push('2) Route.computeRoutes 最小テスト…');
+      box.textContent = lines.join('\n');
+      const test = await Route.computeRoutes({
+        origin: { lat: 35.0116, lng: 135.7681 },
+        destination: { lat: 35.0210, lng: 135.7720 },
+        travelMode: 'DRIVING',
+        routingPreference: 'TRAFFIC_AWARE',
+        fields: ['durationMillis', 'distanceMeters'],
+      });
+      const route = test?.routes?.[0];
+      if (!route) throw new Error('診断用ルートが返りませんでした。');
+      lines.push(`   OK: ${Math.round(Number(route.distanceMeters || 0))}m / ${Math.round(Number(route.durationMillis || 0) / 1000)}秒`);
+      lines.push('');
+      lines.push('Google側の基本認証は正常です。通常計算で失敗する場合は、リクエスト内容側の問題です。');
+    } catch (error) {
+      const raw = extractErrorDetails(error);
+      lines.push('');
+      lines.push('失敗しました。');
+      lines.push(`生エラー: ${raw}`);
+      if (captured.length) {
+        lines.push('');
+        lines.push('console.error:');
+        captured.slice(-6).forEach((x) => lines.push(`- ${x}`));
+      }
+      if (errorEvents.length) {
+        lines.push('');
+        lines.push('window error:');
+        errorEvents.slice(-6).forEach((x) => lines.push(`- ${x}`));
+      }
+      lines.push('');
+      lines.push('この診断結果をそのまま共有してください。APIキー本体は表示されません。');
+    } finally {
+      console.error = originalConsoleError;
+      window.removeEventListener('error', onWindowError);
+      box.textContent = lines.join('\n');
+      els.googleDiag.disabled = false;
+    }
+  }
+
+  function maskKey(key) {
+    if (!key) return '(none)';
+    if (key.length <= 10) return `${key.slice(0, 3)}… (${key.length}文字)`;
+    return `${key.slice(0, 6)}…${key.slice(-4)} (${key.length}文字)`;
+  }
+
+  function extractErrorDetails(error) {
+    const parts = [];
+    if (error?.name) parts.push(`name=${error.name}`);
+    if (error?.code !== undefined) parts.push(`code=${String(error.code)}`);
+    if (error?.status !== undefined) parts.push(`status=${String(error.status)}`);
+    if (error?.message) parts.push(`message=${error.message}`);
+    if (!parts.length) parts.push(String(error || 'unknown'));
+    try {
+      if (error && typeof error === 'object') {
+        const own = {};
+        for (const k of Object.keys(error)) own[k] = error[k];
+        if (Object.keys(own).length) parts.push(`details=${JSON.stringify(own)}`);
+      }
+    } catch (_) { /* no-op */ }
+    return parts.join(' | ');
+  }
+
   async function loadGoogleRoutes(apiKey) {
     if (window.google?.maps?.importLibrary) {
       return google.maps.importLibrary('routes');
@@ -1941,6 +2048,28 @@
     mapsLoadPromise = new Promise((resolve, reject) => {
       const callbackName = `deadlineNaviGoogleReady_${Date.now()}`;
       const script = document.createElement('script');
+      const previousAuthFailure = window.gm_authFailure;
+      let settled = false;
+      const cleanup = () => {
+        if (window.gm_authFailure === authFailureHandler) {
+          if (previousAuthFailure) window.gm_authFailure = previousAuthFailure;
+          else delete window.gm_authFailure;
+        }
+      };
+      const fail = (error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        mapsLoadPromise = null;
+        reject(error);
+      };
+      const authFailureHandler = () => {
+        fail(new Error(`Google Maps JavaScript API authentication failed (gm_authFailure). origin=${location.origin}`));
+      };
+      window.gm_authFailure = authFailureHandler;
+      const timeoutId = window.setTimeout(() => {
+        fail(new Error(`Google Maps JavaScript API load timeout. origin=${location.origin}`));
+      }, 15000);
       const params = new URLSearchParams({
         key: apiKey,
         v: 'weekly',
@@ -1955,16 +2084,21 @@
         try {
           delete window[callbackName];
           const routesLibrary = await google.maps.importLibrary('routes');
+          if (settled) return;
+          settled = true;
+          window.clearTimeout(timeoutId);
+          cleanup();
           resolve(routesLibrary);
         } catch (error) {
-          reject(error);
+          window.clearTimeout(timeoutId);
+          fail(error);
         }
       };
 
       script.onerror = () => {
         delete window[callbackName];
-        mapsLoadPromise = null;
-        reject(new Error('Google Maps JavaScript APIを読み込めませんでした。'));
+        window.clearTimeout(timeoutId);
+        fail(new Error(`Google Maps JavaScript API script load failed. origin=${location.origin}`));
       };
 
       document.head.appendChild(script);
@@ -2226,16 +2360,23 @@
 
   function normalizeApiError(error) {
     const text = String(error?.message || error || '不明なエラー');
-    if (/ApiNotActivatedMapError|not activated/i.test(text)) {
-      return '必要なGoogle APIが有効化されていないようです。Maps JavaScript API と Routes API を確認してください。';
+    const raw = extractErrorDetails(error);
+    if (/RefererNotAllowedMapError/i.test(text)) {
+      return `Google APIのHTTPリファラー制限で拒否されています。生エラー：${raw}`;
     }
-    if (/InvalidKeyMapError|API key/i.test(text)) {
-      return 'Google Maps APIキーを確認してください。HTTPリファラー制限も、公開先のURLを許可する必要があります。';
+    if (/ApiTargetBlockedMapError/i.test(text)) {
+      return `Google APIの「APIの制限」で必要なAPIが許可されていません。生エラー：${raw}`;
+    }
+    if (/ApiNotActivatedMapError|not activated/i.test(text)) {
+      return `必要なGoogle APIが有効化されていません。生エラー：${raw}`;
+    }
+    if (/InvalidKeyMapError|missing a valid API key|API key/i.test(text)) {
+      return `Google APIキー認証で失敗しました。生エラー：${raw}`;
     }
     if (/billing/i.test(text)) {
-      return 'Google Cloud側の請求先設定を確認してください。';
+      return `Google Cloud側の請求先設定を確認してください。生エラー：${raw}`;
     }
-    return `計算に失敗しました：${text}`;
+    return `計算に失敗しました：${raw}`;
   }
 
   function setBusy(busy) {
