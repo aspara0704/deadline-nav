@@ -14,7 +14,7 @@ function app(payload = catalog, legacy = []) {
     fetch: async url => {calls.push(url); assert.match(url, /^\.\/ic-data\.min\.json\?/); if (payload instanceof Error) throw payload; return {ok:true, json:async()=>payload};},
     legacy,
   };
-  const source = original.replace('  init();', '  nationalIcCatalog = legacy;').replace(/\}\)\(\);\s*$/, `globalThis.api = {ensureNationalIcCatalogV072, discoverCandidatePoolV070, fetchOsmIcCellV070, discoverInterchangesAlongRoute, fetchNavitimeIcSearch, getMeta:()=>nationalIcMeta, usage:()=>apiUsageCurrent};})();`);
+  const source = original.replace('  init();', '  nationalIcCatalog = legacy;').replace(/\}\)\(\);\s*$/, `globalThis.api = {ensureNationalIcCatalogV072, discoverCandidatePoolV070, fetchOsmIcCellV070, discoverInterchangesAlongRoute, fetchNavitimeIcSearch, getMeta:()=>nationalIcMeta, usage:()=>apiUsageCurrent, prefilterDiscoveredCandidatesV071};})();`);
   vm.runInNewContext(source, context);
   return {...context.api, calls, elements};
 }
@@ -69,4 +69,27 @@ test('failed bundle labels legacy fallback honestly', async () => {
   assert.equal((await a.ensureNationalIcCatalogV072()).length,catalog.items.length);
   assert.equal(a.getMeta().bundled,false);
   assert.match(a.elements.get('apiUsageDiag').textContent,/端末キャッシュ/);
+});
+
+
+test('v0.7.3 matrix prefilter keeps requested hard limits', () => {
+  const a = app();
+  const make = (n) => Array.from({length:n}, (_,i) => ({
+    id: 'x'+i,
+    name: '候補'+i+'IC',
+    source: 'NATIONAL',
+    corridorDistanceMeters: i * 1000,
+    localRankScore: i * 1000,
+  }));
+  assert.equal(a.prefilterDiscoveredCandidatesV071(make(40), 12).length, 12);
+  assert.equal(a.prefilterDiscoveredCandidatesV071(make(40), 18).length, 18);
+  assert.equal(a.prefilterDiscoveredCandidatesV071(make(40), 8).length, 8);
+});
+
+test('v0.7.3 budget constants and version are present', () => {
+  assert.match(original, /CURRENT_APP_VERSION = '0\.7\.3'/);
+  assert.match(original, /NATIONAL_IC_PREFILTER_LIMIT = 12/);
+  assert.match(original, /NATIONAL_IC_RECOVERY_LIMIT = 18/);
+  assert.match(original, /V073_BUILTIN_FALLBACK_LIMIT = 8/);
+  assert.match(original, /V073_MATRIX_ELEMENT_BUDGET = 99/);
 });
