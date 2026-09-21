@@ -5,6 +5,9 @@ on:
     paths:
       - 'tools/build-osm-toll-graph.py'
       - 'tests/osm-toll-graph.test.cjs'
+      - 'toll-tariff-rules.js'
+      - 'tests/toll-tariff-rules.test.cjs'
+      - 'tools/quote-kansai-pilot.cjs'
       - 'TOLL-GRAPH-NOTICE.md'
       - '.github/workflows/verify-toll-graph.yml'
   workflow_dispatch:
