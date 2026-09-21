@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'tools/build-ic-data.py'
+      - 'tools/ic-supplement.json'
       - 'ic-data.min.json'
       - '.github/workflows/build-ic-data.yml'
   workflow_dispatch:
@@ -37,6 +38,11 @@ jobs:
           assert all(isinstance(x.get('lat'),(int,float)) and isinstance(x.get('lng'),(int,float)) for x in items)
           print('catalog entries:', len(items))
           PY
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Verify local discovery
+        run: node --test tests/local-ic.test.cjs
       - name: Commit generated catalog
         run: |
           if git diff --quiet -- ic-data.min.json; then
@@ -48,3 +54,4 @@ jobs:
           git add ic-data.min.json
           git commit -m 'Build bundled nationwide IC catalog'
           git push
+

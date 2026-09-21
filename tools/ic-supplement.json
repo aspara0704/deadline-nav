@@ -1,0 +1,14 @@
+{
+  "items": [
+    {
+      "id": "supplement-oguraike",
+      "name": "巨椋池IC",
+      "lat": 34.908806,
+      "lng": 135.7495333,
+      "smart": false,
+      "sourceUrl": "https://ja.wikipedia.org/w/index.php?title=巨椋池インターチェンジ&oldid=109096812",
+      "note": "元データ未収録。IC代表点（入口ランプの誘導座標ではない）。門真方面のみ。代表点をGoogle経路へ渡す既存仕様を維持。入口ランプ・方向別の実経路は別途確認が必要。",
+      "attribution": "Wikipedia contributors, 巨椋池インターチェンジ, CC BY-SA 4.0"
+    }
+  ]
+}
