@@ -3,8 +3,9 @@ name: Verify toll road graph
 on:
   pull_request:
     paths:
-      - 'tools/build-toll-graph.py'
-      - 'tests/toll-graph.test.cjs'
+      - 'tools/build-osm-toll-graph.py'
+      - 'tests/osm-toll-graph.test.cjs'
+      - 'TOLL-GRAPH-NOTICE.md'
       - '.github/workflows/verify-toll-graph.yml'
   workflow_dispatch:
 
@@ -12,7 +13,7 @@ permissions:
   contents: read
 
 jobs:
-  graph:
+  kansai-pilot:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,179 +23,41 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Install OSM reader
+        run: python3 -m pip install --quiet osmium
       - name: Unit tests
-        run: node --test tests/toll-graph.test.cjs
-      - name: Download pinned HighwayOrderedDS sources
+        run: node --test tests/osm-toll-graph.test.cjs
+      - name: Download pinned Kansai OSM extract
         run: |
-          curl --fail --location --retry 3 \
-            'https://raw.githubusercontent.com/yH3PO4/HighwayOrderedDS/523b06097594e58d2004928b032951f69bd45398/data/highway_point.geojson' \
-            --output /tmp/highway_point.geojson
-          curl --fail --location --retry 3 \
-            'https://raw.githubusercontent.com/yH3PO4/HighwayOrderedDS/523b06097594e58d2004928b032951f69bd45398/data/highway_path.geojson' \
-            --output /tmp/highway_path.geojson
-          curl --fail --location --retry 3 \
-            'https://raw.githubusercontent.com/yH3PO4/HighwayOrderedDS/523b06097594e58d2004928b032951f69bd45398/data/N06_Joint_fixed.geojson' \
-            --output /tmp/N06_Joint_fixed.geojson
-          curl --fail --location --retry 3 \
-            'https://raw.githubusercontent.com/yH3PO4/HighwayOrderedDS/523b06097594e58d2004928b032951f69bd45398/data/N06_HighwaySection_fixed.geojson' \
-            --output /tmp/N06_HighwaySection_fixed.geojson
-      - name: Probe N06 coverage for the Kyoto-Osaka reference corridor
-        run: |
-          python3 - <<'PY'
-          import json
-          terms=['久御山','枚方','巨椋池','第二京阪','京滋']
-          for path in ['/tmp/N06_Joint_fixed.geojson','/tmp/N06_HighwaySection_fixed.geojson']:
-              d=json.load(open(path,encoding='utf-8-sig'))
-              print('\nSOURCE',path,'features',len(d.get('features',[])))
-              for term in terms:
-                  hits=[]
-                  for f in d.get('features',[]):
-                      p=f.get('properties') or {}
-                      if term in json.dumps(p,ensure_ascii=False):
-                          hits.append(p)
-                  print(term,'matches',len(hits))
-                  for p in hits[:8]:
-                      print(' ',p)
-          sections=json.load(open('/tmp/N06_HighwaySection_fixed.geojson',encoding='utf-8-sig')).get('features',[])
-          print('\nSECTION PROPERTY SAMPLE')
-          for f in sections[:5]:
-              print(f.get('properties') or {})
-          print('\nKYOTO-OSAKA SECTION SAMPLE')
-          shown=0
-          for f in sections:
-              g=f.get('geometry') or {}
-              coords=g.get('coordinates') or []
-              flat=[]
-              def walk(x):
-                  if isinstance(x,list) and len(x)>=2 and all(isinstance(v,(int,float)) for v in x[:2]):
-                      flat.append((float(x[0]),float(x[1])))
-                  elif isinstance(x,list):
-                      for y in x: walk(y)
-              walk(coords)
-              if any(135.45 <= lng <= 135.85 and 34.60 <= lat <= 35.10 for lng,lat in flat):
-                  print(f.get('properties') or {})
-                  if flat:
-                      print(' endpoints',flat[0],flat[-1])
-                  shown += 1
-                  if shown >= 30: break
-          PY
-      - name: Probe latest MLIT N06 snapshot
-        run: |
-          curl --fail --location --retry 3 \
-            'https://nlftp.mlit.go.jp/ksj/gml/data/N06/N06-25/N06-25_GML.zip' \
-            --output /tmp/N06-25_GML.zip
-          rm -rf /tmp/n06latest
-          mkdir -p /tmp/n06latest
-          unzip -q /tmp/N06-25_GML.zip -d /tmp/n06latest
-          find /tmp/n06latest -maxdepth 2 -type f -printf '%f %s bytes\n' | sort
-          python3 - <<'PY'
-          import json, pathlib
-          terms=['久御山南','枚方東','巨椋池','第二京阪','京滋']
-          files=list(pathlib.Path('/tmp/n06latest').rglob('*.geojson'))
-          print('geojson files:',[str(x) for x in files])
-          for path in files:
-              try:d=json.load(open(path,encoding='utf-8-sig'))
-              except Exception:continue
-              matches=[]
-              for term in terms:
-                  n=sum(term in json.dumps(f.get('properties') or {},ensure_ascii=False) for f in d.get('features',[]))
-                  if n:matches.append((term,n))
-              if matches:print(path.name,matches)
-
-          joints=json.load(open('/tmp/n06latest/N06-25_GML/UTF-8/N06-25_Joint.geojson',encoding='utf-8-sig'))
-          print('\nLATEST JOINT PROPERTY SAMPLE')
-          for f in joints.get('features',[])[:5]:
-              print(f.get('properties') or {}, (f.get('geometry') or {}).get('coordinates'))
-          print('\nLATEST JOINTS KYOTO-OSAKA BBOX')
-          shown=0
-          for f in joints.get('features',[]):
-              co=(f.get('geometry') or {}).get('coordinates')
-              if isinstance(co,list) and len(co)>=2:
-                  lng,lat=co[0],co[1]
-                  if isinstance(lng,(int,float)) and isinstance(lat,(int,float)) and 135.45 <= lng <= 135.85 and 34.60 <= lat <= 35.10:
-                      print(f.get('properties') or {}, co)
-                      shown+=1
-                      if shown>=120:break
-          print('bbox joint count shown',shown)
-          print('\nLATEST JOINTS SOUTH KYOTO / NORTH OSAKA SORTED')
-          focus=[]
-          for f in joints.get('features',[]):
-              co=(f.get('geometry') or {}).get('coordinates')
-              if isinstance(co,list) and len(co)>=2 and all(isinstance(v,(int,float)) for v in co[:2]):
-                  lng,lat=float(co[0]),float(co[1])
-                  if 135.62 <= lng <= 135.83 and 34.72 <= lat <= 34.96:
-                      p=f.get('properties') or {}
-                      if str(p.get('N06_014'))=='9999':
-                          focus.append((lat,lng,p))
-          for lat,lng,p in sorted(focus,reverse=True):
-              print(f"{lat:.6f} {lng:.6f}",p)
-          print('focus active joint count',len(focus))
-
-          sections=json.load(open('/tmp/n06latest/N06-25_GML/UTF-8/N06-25_HighwaySection.geojson',encoding='utf-8-sig'))
-          print('\nLATEST SECTION PROPERTY SAMPLE')
-          for f in sections.get('features',[])[:5]:
-              print(f.get('properties') or {})
-          print('\nLATEST SECTIONS KYOTO-OSAKA BBOX')
-          shown=0
-          for f in sections.get('features',[]):
-              coords=(f.get('geometry') or {}).get('coordinates') or []
-              flat=[]
-              def walk2(x):
-                  if isinstance(x,list) and len(x)>=2 and all(isinstance(v,(int,float)) for v in x[:2]):
-                      flat.append((float(x[0]),float(x[1])))
-                  elif isinstance(x,list):
-                      for y in x:walk2(y)
-              walk2(coords)
-              if any(135.45 <= lng <= 135.85 and 34.60 <= lat <= 35.10 for lng,lat in flat):
-                  print(f.get('properties') or {})
-                  if flat: print(' endpoints',flat[0],flat[-1])
-                  shown+=1
-                  if shown>=80:break
-          print('bbox section count shown',shown)
-          PY
-      - name: Probe current OpenStreetMap Kansai motorway junction coverage
-        run: |
-          python3 -m pip install --quiet osmium
           curl --fail --location --retry 3 \
             'https://download.geofabrik.de/asia/japan/kansai-260920.osm.pbf' \
             --output /tmp/kansai.osm.pbf
-          python3 - <<'PY'
-          import osmium
-          class H(osmium.SimpleHandler):
-              def __init__(self):
-                  super().__init__()
-                  self.focus=[]
-                  self.terms=[]
-              def node(self,n):
-                  if n.tags.get('highway')!='motorway_junction' or not n.location.valid():
-                      return
-                  name=n.tags.get('name') or n.tags.get('name:ja') or ''
-                  ref=n.tags.get('ref') or ''
-                  lat=float(n.location.lat); lon=float(n.location.lon)
-                  if any(t in name for t in ['久御山南','枚方東','巨椋池','久御山','八幡京田辺']):
-                      self.terms.append((name,ref,lat,lon))
-                  if 135.62 <= lon <= 135.83 and 34.72 <= lat <= 34.96:
-                      self.focus.append((lat,lon,name,ref,dict(n.tags)))
-          h=H(); h.apply_file('/tmp/kansai.osm.pbf',locations=True)
-          print('OSM TERM MATCHES')
-          for x in sorted(h.terms): print(x)
-          print('OSM FOCUS JUNCTIONS',len(h.focus))
-          for x in sorted(h.focus,reverse=True)[:120]: print(x)
-          PY
-      - name: Build graph from real source
-        run: python3 tools/build-toll-graph.py /tmp/highway_point.geojson /tmp/highway_path.geojson /tmp/toll-road-graph.min.json
-      - name: Validate graph metadata
+      - name: Build compact expressway graph
+        run: |
+          python3 tools/build-osm-toll-graph.py \
+            /tmp/kansai.osm.pbf \
+            /tmp/toll-road-graph-kansai.min.json \
+            --source-label 'Geofabrik Kansai 2026-09-20'
+      - name: Verify reference corridor connectivity
         run: |
           python3 - <<'PY'
-          import json
-          d=json.load(open('/tmp/toll-road-graph.min.json',encoding='utf-8'))
-          m=d['meta']
-          assert m['nodeCount'] >= 300, m
-          assert m['roadEdgeCount'] >= 200, m
-          assert m['completeForPricing'] is False
-          print(json.dumps(m,ensure_ascii=False,indent=2))
+          import json,importlib.util
+          spec=importlib.util.spec_from_file_location('m','tools/build-osm-toll-graph.py')
+          m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+          g=json.load(open('/tmp/toll-road-graph-kansai.min.json',encoding='utf-8'))
+          required=['久御山南IC','枚方東IC','巨椋池IC','京都南IC']
+          for name in required:
+              key=m.normalize_name(name)
+              assert key in g['junctionIndex'] and g['junctionIndex'][key], (name,key)
+          start=g['junctionIndex'][m.normalize_name('久御山南IC')]
+          goal=g['junctionIndex'][m.normalize_name('枚方東IC')]
+          d,path=m.shortest_distance(g,start,goal)
+          assert d is not None and 5 < d < 30, d
+          print('久御山南IC -> 枚方東IC shortest graph distance km:',round(d,3))
+          print('roads:',sorted({e.get('road') for e in path if e.get('road')}))
+          print(json.dumps(g['meta'],ensure_ascii=False,indent=2))
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: toll-road-graph-prototype
-          path: /tmp/toll-road-graph.min.json
+          name: toll-road-graph-kansai-pilot
+          path: /tmp/toll-road-graph-kansai.min.json
