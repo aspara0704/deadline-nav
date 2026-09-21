@@ -334,3 +334,13 @@ body { background: #f4f6fa; }
 }
 .data-attribution { margin-top: 6px; font-size: 11px; color: var(--muted); }
 .data-attribution a { color: inherit; }
+
+
+/* v0.7.1 diagnostics */
+.diagnostic-panel {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border, #d9dee7);
+}
+.diagnostic-panel h3 { margin: 0 0 6px; font-size: 1rem; }
+.diagnostic-panel .diagnostic-output { margin-top: 10px; }

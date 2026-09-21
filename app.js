@@ -6,7 +6,20 @@
   const STORAGE_KEY_FORM = 'deadlineNavi.formV05';
   const STORAGE_KEY_IC_CATALOG = 'deadlineNavi.icCatalogV070';
   const STORAGE_KEY_NAVITIME_BLOCK = 'deadlineNavi.navitimeBlockV070';
+  const STORAGE_KEY_NATIONAL_IC_LEGACY = 'deadlineNavi.nationalIcV071';
+  const STORAGE_KEY_NATIONAL_IC_META_LEGACY = 'deadlineNavi.nationalIcMetaV071';
   const STORAGE_KEY_API_USAGE = 'deadlineNavi.apiUsageV071';
+  const CURRENT_APP_VERSION = '0.7.2';
+  const LOCAL_IC_DATA_URL = './ic-data.min.json?v=072';
+  const LOCAL_IC_MIN_COMPLETE_COUNT = 300;
+  const IC_DISCOVERY_NETWORK_DISABLED = true;
+  const NATIONAL_IC_PREFILTER_LIMIT = 18;
+  const NATIONAL_IC_RECOVERY_LIMIT = 30;
+  const NATIONAL_IC_CORRIDOR_M = 65_000;
+  const GOOGLE_FREE_CAP_PRO = 5_000;
+  const GOOGLE_FREE_CAP_ENTERPRISE = 1_000;
+  const GOOGLE_PRICE_PRO_PER_1000_USD = 10;
+  const GOOGLE_PRICE_ENTERPRISE_PER_1000_USD = 15;
   const AUTO_NORMAL_INTERVAL_MS = 5 * 60_000;
   const AUTO_APPROACH_INTERVAL_MS = 3 * 60_000;
   const AUTO_CRITICAL_INTERVAL_MS = 60_000;
@@ -58,7 +71,7 @@
   const IC_CATALOG_MAX = 900;
   const OSM_DISCOVERY_RADIUS_KM = 14;
   const OSM_DISCOVERY_CONCURRENCY = 2;
-  const V070_EXACT_LIMIT = 14;
+  const V070_EXACT_LIMIT = 12;
   const V070_GOOGLE_TOLL_LIMIT = 4;
   const V070_NAVITIME_FARE_LIMIT = 2;
   const FARE_CACHE_TTL_MS = 15 * 60_000;
@@ -133,8 +146,9 @@
     voiceSelect: $('voiceSelect'),
     voiceStatus: $('voiceStatus'),
     monitorDetail: $('monitorDetail'),
-    apiUsageDetail: $('apiUsageDetail'),
-    apiUsageReset: $('apiUsageReset'),
+    icCatalogStatus: $('icCatalogStatus'),
+    apiUsageDiag: $('apiUsageDiag'),
+    resetApiUsage: $('resetApiUsage'),
   };
 
   let currentPosition = null;
@@ -149,6 +163,11 @@
   let persistentIcCatalog = [];
   let navitimeBlockedUntil = 0;
   let navitimeBlockedReason = '';
+  let nationalIcCatalog = [];
+  let nationalIcMeta = null;
+  let apiUsageMonth = createEmptyApiUsage();
+  let apiUsageSession = createEmptyApiUsage();
+  let apiUsageCurrent = createEmptyApiUsage();
   const autoMonitor = {
     active: false,
     watchId: null,
@@ -160,23 +179,19 @@
     speechPrimed: false,
   };
 
-  let apiUsageLifetime = loadApiUsageLifetime();
-  let apiUsageSession = emptyApiUsageCounters();
-  let apiUsageCurrentCycle = null;
-  let apiUsageLastCycle = null;
-
   init();
 
   function init() {
     restoreState();
     restoreInfrastructureState();
+    restoreApiUsage();
     setDefaultDeadlineIfEmpty();
     refreshApiStatus();
     refreshNavitimeStatus();
 
     els.saveApiKey.addEventListener('click', saveApiKey);
     els.googleDiag?.addEventListener('click', diagnoseGoogleApi);
-    els.apiUsageReset?.addEventListener('click', resetApiUsageCounters);
+    els.resetApiUsage?.addEventListener('click', resetApiUsageCounters);
     els.saveNavitimeApiKey.addEventListener('click', saveNavitimeApiKey);
     els.getLocation.addEventListener('click', requestLocation);
     els.useDebugNow.addEventListener('change', () => { updateDebugControls(); persistFormState(); });
@@ -200,7 +215,12 @@
     });
     updateDebugControls();
     updateAutoUi();
-    refreshApiUsageUi();
+    renderApiUsageDiagnostic();
+    ensureNationalIcCatalogV072().catch((error) => {
+      console.warn('Bundled IC catalog bootstrap failed:', error);
+      renderIcCatalogStatus('全国ICカタログを読み込めません。内蔵候補で継続します。');
+    });
+    checkAppVersionV072().catch(() => {});
   }
 
   function restoreState() {
@@ -350,6 +370,15 @@
     } catch (_) {
       persistentIcCatalog = [];
     }
+    try {
+      const rawNational = JSON.parse(safeStorageGet(STORAGE_KEY_NATIONAL_IC_LEGACY) || '[]');
+      nationalIcCatalog = Array.isArray(rawNational) ? rawNational : [];
+      nationalIcMeta = JSON.parse(safeStorageGet(STORAGE_KEY_NATIONAL_IC_META_LEGACY) || 'null');
+    } catch (_) {
+      nationalIcCatalog = [];
+      nationalIcMeta = null;
+    }
+    renderIcCatalogStatus();
   }
 
   function clearNavitimeBlock() {
@@ -870,11 +899,263 @@
     return 2 * R * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
   }
 
+  function createEmptyApiUsage() {
+    return {
+      googleRoutesPro: 0,
+      googleRoutesEnterprise: 0,
+      googleMatrixRequests: 0,
+      googleMatrixElements: 0,
+      navitimeIc: 0,
+      navitimeRoute: 0,
+      overpass: 0,
+      catalogDownloads: 0,
+    };
+  }
+
+  function currentMonthKey() {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  }
+
+  function restoreApiUsage() {
+    try {
+      const raw = JSON.parse(safeStorageGet(STORAGE_KEY_API_USAGE) || '{}');
+      apiUsageMonth = raw.month === currentMonthKey() && raw.usage ? { ...createEmptyApiUsage(), ...raw.usage } : createEmptyApiUsage();
+    } catch (_) {
+      apiUsageMonth = createEmptyApiUsage();
+    }
+  }
+
+  function saveApiUsage() {
+    safeStorageSet(STORAGE_KEY_API_USAGE, JSON.stringify({ month: currentMonthKey(), usage: apiUsageMonth }));
+  }
+
+  function beginApiUsageCalculation() {
+    apiUsageCurrent = createEmptyApiUsage();
+    renderApiUsageDiagnostic();
+  }
+
+  function incrementApiUsage(key, amount = 1) {
+    if (!Object.prototype.hasOwnProperty.call(apiUsageMonth, key)) return;
+    const n = Number(amount) || 0;
+    apiUsageMonth[key] += n;
+    apiUsageSession[key] += n;
+    apiUsageCurrent[key] += n;
+    saveApiUsage();
+    renderApiUsageDiagnostic();
+  }
+
+  function resetApiUsageCounters() {
+    apiUsageMonth = createEmptyApiUsage();
+    apiUsageSession = createEmptyApiUsage();
+    apiUsageCurrent = createEmptyApiUsage();
+    saveApiUsage();
+    renderApiUsageDiagnostic();
+  }
+
+  function formatUsageBlock(label, u) {
+    return [
+      label,
+      `  Google Routes Pro: ${u.googleRoutesPro} req`,
+      `  Google Routes Enterprise (TOLLS): ${u.googleRoutesEnterprise} req`,
+      `  Route Matrix Pro: ${u.googleMatrixElements} elements / ${u.googleMatrixRequests} req`,
+      `  NAVITIME IC: ${u.navitimeIc} req`,
+      `  NAVITIME Route: ${u.navitimeRoute} req`,
+      `  Overpass: ${u.overpass} req`,
+      `  IC catalog download: ${u.catalogDownloads}`,
+    ].join('\n');
+  }
+
+  function estimateGoogleListPriceUsd(u) {
+    // Reference list-price estimate only. It deliberately does not try to
+    // reproduce Cloud Billing credits, negotiated pricing, tax, or FX.
+    const proBillable = Math.max(0, Number(u.googleRoutesPro || 0) - GOOGLE_FREE_CAP_PRO);
+    const matrixBillable = Math.max(0, Number(u.googleMatrixElements || 0) - GOOGLE_FREE_CAP_PRO);
+    const enterpriseBillable = Math.max(0, Number(u.googleRoutesEnterprise || 0) - GOOGLE_FREE_CAP_ENTERPRISE);
+    return (proBillable + matrixBillable) * GOOGLE_PRICE_PRO_PER_1000_USD / 1000
+      + enterpriseBillable * GOOGLE_PRICE_ENTERPRISE_PER_1000_USD / 1000;
+  }
+
+  function renderApiUsageDiagnostic() {
+    if (!els.apiUsageDiag) return;
+    const catalogLine = nationalIcCatalog.length
+      ? `全国ICカタログ: ${nationalIcCatalog.length.toLocaleString('ja-JP')}件（${nationalIcMeta?.bundled ? 'アプリ同梱' : 'v0.7.1端末キャッシュ'}）`
+      : '全国ICカタログ: 未読込';
+    els.apiUsageDiag.textContent = [
+      formatUsageBlock('今回の計算', apiUsageCurrent),
+      '',
+      formatUsageBlock('このブラウザ・今月', apiUsageMonth),
+      `  無料枠目安: Routes Pro ${apiUsageMonth.googleRoutesPro}/${GOOGLE_FREE_CAP_PRO}, Matrix Pro ${apiUsageMonth.googleMatrixElements}/${GOOGLE_FREE_CAP_PRO}, Enterprise ${apiUsageMonth.googleRoutesEnterprise}/${GOOGLE_FREE_CAP_ENTERPRISE}`,
+      `  参考従量額: US$${estimateGoogleListPriceUsd(apiUsageMonth).toFixed(2)}（このブラウザ分を現行公開単価・無料枠で単純換算）`,
+      '',
+      catalogLine,
+      '※ Cloud Billingの確定額ではありません。プロジェクト全体の他端末利用、クレジット、税、為替、料金改定等はGoogle Cloud Consoleで確認してください。',
+    ].join('\n');
+  }
+
+  async function trackedComputeRoutes(Route, request) {
+    const enterprise = Array.isArray(request?.extraComputations) && request.extraComputations.includes('TOLLS');
+    incrementApiUsage(enterprise ? 'googleRoutesEnterprise' : 'googleRoutesPro', 1);
+    return Route.computeRoutes(request);
+  }
+
+  async function trackedComputeRouteMatrix(RouteMatrix, request) {
+    const origins = Array.isArray(request?.origins) ? request.origins.length : 0;
+    const destinations = Array.isArray(request?.destinations) ? request.destinations.length : 0;
+    incrementApiUsage('googleMatrixRequests', 1);
+    incrementApiUsage('googleMatrixElements', origins * destinations);
+    return RouteMatrix.computeRouteMatrix(request);
+  }
+
+  function renderIcCatalogStatus(message = '') {
+    if (!els.icCatalogStatus) return;
+    if (message) {
+      els.icCatalogStatus.textContent = message;
+      return;
+    }
+    if (nationalIcCatalog.length) {
+      const source = nationalIcMeta?.sourceLabel || '全国ICカタログ';
+      els.icCatalogStatus.textContent = `${source}: ${nationalIcCatalog.length.toLocaleString('ja-JP')}件（${nationalIcMeta?.bundled ? 'アプリ同梱' : '端末キャッシュ移行'}）`;
+    } else {
+      els.icCatalogStatus.textContent = '全国ICカタログを読み込み中…';
+    }
+  }
+
+  function normalizeNationalIcName(name, type) {
+    const raw = String(name || '').trim();
+    if (!raw) return '';
+    if (/IC$|SIC$|JCT\/IC$|JCT$/i.test(raw)) return raw;
+    return type === '2' ? `${raw}SIC` : `${raw}IC`;
+  }
+
+  async function ensureNationalIcCatalogV072() {
+    if (nationalIcCatalog.length >= LOCAL_IC_MIN_COMPLETE_COUNT && nationalIcMeta?.bundled) {
+      renderIcCatalogStatus();
+      return nationalIcCatalog;
+    }
+
+    renderIcCatalogStatus('全国ICカタログをアプリ内データから読み込み中…');
+    let localData = null;
+    try {
+      // Same-origin static asset bundled with Deadline Navi. This is deliberately
+      // not counted as an external API request.
+      const response = await fetch(LOCAL_IC_DATA_URL, { cache: 'no-store' });
+      if (!response.ok) throw new Error(`local IC data HTTP ${response.status}`);
+      localData = await response.json();
+    } catch (error) {
+      console.warn('Local IC data load failed:', error);
+    }
+
+    const items = Array.isArray(localData?.items) ? localData.items : [];
+    const clean = [];
+    const seen = new Set();
+    for (const item of items) {
+      const lat = Number(item?.lat);
+      const lng = Number(item?.lng);
+      const name = String(item?.name || '').trim();
+      if (!name || !Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+      const key = normalizeIcKey(name);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      clean.push({
+        id: String(item?.id || `local-${key}`),
+        name,
+        lat,
+        lng,
+        smart: Boolean(item?.smart),
+      });
+    }
+
+    if (clean.length >= LOCAL_IC_MIN_COMPLETE_COUNT) {
+      nationalIcCatalog = clean;
+      nationalIcMeta = {
+        sourceLabel: '全国ICカタログ',
+        source: String(localData?.meta?.source || 'MLIT N06 derived / HighwayOrderedDS'),
+        generatedAt: localData?.meta?.generatedAt || null,
+        count: clean.length,
+        bundled: true,
+      };
+      renderIcCatalogStatus();
+      renderApiUsageDiagnostic();
+      return nationalIcCatalog;
+    }
+
+    // One-version migration path: users who already ran v0.7.1 may have the
+    // complete catalog in localStorage. Use it locally, but never reach out to
+    // GitHub/Overpass/NAVITIME to discover ICs at runtime.
+    if (nationalIcCatalog.length >= LOCAL_IC_MIN_COMPLETE_COUNT) {
+      nationalIcMeta = { ...(nationalIcMeta || {}), sourceLabel: '全国ICカタログ', bundled: false };
+      renderIcCatalogStatus();
+      renderApiUsageDiagnostic();
+      return nationalIcCatalog;
+    }
+
+    nationalIcCatalog = clean;
+    nationalIcMeta = {
+      sourceLabel: '全国ICカタログ',
+      source: String(localData?.meta?.source || 'bundled seed'),
+      generatedAt: localData?.meta?.generatedAt || null,
+      count: clean.length,
+      bundled: true,
+      complete: false,
+    };
+    renderIcCatalogStatus(clean.length
+      ? `全国ICカタログ: ${clean.length.toLocaleString('ja-JP')}件（生成待ちの同梱データ）`
+      : '全国ICカタログは生成待ちです。内蔵候補だけで継続します。');
+    renderApiUsageDiagnostic();
+    return nationalIcCatalog;
+  }
+
+  function nationalIcCandidatesNearRouteV071(routePath, discoveryPoints = [], maxDistanceMeters = NATIONAL_IC_CORRIDOR_M, limit = NATIONAL_IC_PREFILTER_LIMIT) {
+    if (!routePath.length || !nationalIcCatalog.length) return [];
+    const mapped = [];
+    for (const stored of nationalIcCatalog) {
+      const point = { lat: Number(stored.lat), lng: Number(stored.lng) };
+      if (!Number.isFinite(point.lat) || !Number.isFinite(point.lng)) continue;
+      const projection = projectPointToRoute(point, routePath);
+      if (!Number.isFinite(projection.corridorDistanceMeters) || projection.corridorDistanceMeters > maxDistanceMeters) continue;
+      let anchorDistanceMeters = Infinity;
+      for (const anchor of discoveryPoints) anchorDistanceMeters = Math.min(anchorDistanceMeters, haversineMeters(point, anchor));
+      const candidate = {
+        id: stored.id || `national-${normalizeIcKey(stored.name)}`,
+        name: stored.name,
+        road: stored.smart ? '全国ICカタログ / スマートIC' : '全国ICカタログ',
+        waypoint: point,
+        mapWaypoint: point,
+        source: 'NATIONAL',
+        ...projection,
+        anchorDistanceMeters,
+      };
+      candidate.localRankScore = (Number.isFinite(anchorDistanceMeters) ? anchorDistanceMeters * 0.75 : 0)
+        + projection.corridorDistanceMeters * 1.25;
+      mapped.push(candidate);
+    }
+    const byAnchor = mapped.slice().sort((a, b) => a.localRankScore - b.localRankScore).slice(0, Math.max(10, Math.ceil(limit * 0.7)));
+    const byCorridor = mapped.slice().sort((a, b) => a.corridorDistanceMeters - b.corridorDistanceMeters).slice(0, Math.max(5, Math.floor(limit * 0.3)));
+    return dedupeIcCandidatesV070([...byAnchor, ...byCorridor]).slice(0, limit);
+  }
+
+  async function checkAppVersionV072() {
+    try {
+      const response = await fetch(`version.json?t=${Date.now()}`, { cache: 'no-store' });
+      if (!response.ok) return;
+      const remote = await response.json();
+      if (remote?.version && remote.version !== CURRENT_APP_VERSION) {
+        const url = new URL(window.location.href);
+        url.searchParams.set('v', String(remote.version).replace(/\./g, ''));
+        window.location.replace(url.toString());
+      }
+    } catch (_) {
+      // Offline use remains available; update check is intentionally best-effort.
+    }
+  }
+
   async function calculate(options = {}) {
     const source = options.source || 'manual';
     const suppressScroll = Boolean(options.suppressScroll || source === 'auto');
     if (calculationInFlight) return null;
     calculationInFlight = true;
+    beginApiUsageCalculation();
 
     showError('');
     persistFormState();
@@ -900,7 +1181,6 @@
     if (Number.isNaN(deadline.getTime())) { calculationInFlight = false; showError('到着希望日時を入力してください。'); return null; }
     if (deadline <= now) { calculationInFlight = false; showError('到着希望日時は、計算に使う現在時刻より後に設定してください。'); return null; }
 
-    beginApiUsageCycle(source);
     setBusy(true);
     let snapshot = null;
 
@@ -930,8 +1210,8 @@
       }, now);
 
       const [normalResult, localResult] = await Promise.all([
-        trackedComputeRoutes(Route, normalRequest, 'direct_google_route'),
-        trackedComputeRoutes(Route, localRequest, 'direct_local_route'),
+        trackedComputeRoutes(Route, normalRequest),
+        trackedComputeRoutes(Route, localRequest),
       ]);
 
       const normalRoute = normalResult.routes?.[0];
@@ -1075,7 +1355,6 @@
       finalizeCalculationSnapshot(snapshot, source);
       return snapshot;
     } finally {
-      endApiUsageCycle(snapshot?.mode || 'unknown');
       setBusy(false);
       calculationInFlight = false;
       if (autoMonitor.active) updateAutoUi();
@@ -1155,6 +1434,7 @@
         navitimeApiKey,
         includeBuiltins: true,
         destination,
+        recovery: true,
       });
       pool = dedupeIcCandidatesV070([...pool, ...recoveryPool]);
       evaluated = await evaluateCandidatePoolV070({
@@ -1252,7 +1532,16 @@
     return points.slice(0, 6);
   }
 
-  async function discoverCandidatePoolV070({ routePath, discoveryPoints, navitimeApiKey, includeBuiltins, destination }) {
+  async function discoverCandidatePoolV070({ routePath, discoveryPoints, navitimeApiKey, includeBuiltins, destination, recovery = false }) {
+    if (!nationalIcCatalog.length) {
+      try { await ensureNationalIcCatalogV072(); } catch (_) { /* continue with local fallbacks only */ }
+    }
+    const national = nationalIcCandidatesNearRouteV071(
+      routePath,
+      discoveryPoints,
+      recovery ? 90_000 : NATIONAL_IC_CORRIDOR_M,
+      recovery ? NATIONAL_IC_RECOVERY_LIMIT : NATIONAL_IC_PREFILTER_LIMIT,
+    );
     const cached = cachedIcCandidatesNearRouteV070(routePath, 45_000);
     const retained = retainedCandidateDestination === destination && retainedCandidate
       ? [{
@@ -1265,34 +1554,35 @@
         source: 'RETAINED',
       }]
       : [];
-    let pool = dedupeIcCandidatesV070([...retained, ...cached]);
-    const mappedNearby = pool.filter((candidate) => candidateProjectionPointV070(candidate)).length;
+    let pool = dedupeIcCandidatesV070([...retained, ...national, ...cached]);
 
-    // Public Overpass is used only as a discovery fallback, in small independent
-    // cells.  This avoids the large multi-box queries that caused 504s in v0.4.x.
-    if (mappedNearby < 8 && discoveryPoints.length) {
-      const osm = await discoverOsmIcNearPointsV070(discoveryPoints);
-      rememberIcCandidatesV070(osm);
-      pool = dedupeIcCandidatesV070([...pool, ...osm]);
-    }
-
-    // NAVITIME is now optional. Use at most a few IC lookups only if the free
-    // discovery sources did not provide enough mapped candidates.
-    const mappedAfterOsm = pool.filter((candidate) => candidateProjectionPointV070(candidate)).length;
-    if (mappedAfterOsm < 8 && navitimeApiKey && canUseNavitime() && discoveryPoints.length) {
-      const nav = await discoverNavitimeIcLimitedV070(discoveryPoints, navitimeApiKey);
-      rememberIcCandidatesV070(nav);
-      pool = dedupeIcCandidatesV070([...pool, ...nav]);
-    }
+    // v0.7.2 invariant: IC discovery is local-only.  Do not query public
+    // Overpass or NAVITIME /ic here. NAVITIME remains available only for the
+    // separate fare fallback path.
 
     // A named Kansai–Tokai catalog is a last-resort safety net, not the normal
     // discovery path. Keeping it out of routine recalculations avoids dozens of
     // unnecessary Route Matrix elements on every refresh.
-    if (includeBuiltins && pool.length < 8) {
+    if (includeBuiltins && pool.length < 4) {
       pool = dedupeIcCandidatesV070([...pool, ...builtinCandidatesForRouteV070(routePath)]);
     }
 
-    return pool;
+    return prefilterDiscoveredCandidatesV071(pool, recovery ? NATIONAL_IC_RECOVERY_LIMIT : NATIONAL_IC_PREFILTER_LIMIT);
+  }
+
+  function prefilterDiscoveredCandidatesV071(candidates, limit) {
+    const rank = { RETAINED: 0, NATIONAL: 1, CACHE: 2, BUILTIN: 3, NAVITIME_IC: 8, OSM: 9 };
+    const mapped = dedupeIcCandidatesV070(candidates).slice();
+    mapped.sort((a, b) => {
+      const ar = rank[a.source] ?? 9;
+      const br = rank[b.source] ?? 9;
+      if (a.source === 'RETAINED' && b.source !== 'RETAINED') return -1;
+      if (b.source === 'RETAINED' && a.source !== 'RETAINED') return 1;
+      const as = Number.isFinite(a.localRankScore) ? a.localRankScore : Number(a.corridorDistanceMeters ?? Infinity);
+      const bs = Number.isFinite(b.localRankScore) ? b.localRankScore : Number(b.corridorDistanceMeters ?? Infinity);
+      return (as - bs) || (ar - br);
+    });
+    return mapped.slice(0, Math.max(1, limit));
   }
 
   function builtinCandidatesForRouteV070(routePath) {
@@ -1380,6 +1670,7 @@
   }
 
   async function discoverOsmIcNearPointsV070(points) {
+    if (IC_DISCOVERY_NETWORK_DISABLED) return [];
     const unique = [];
     for (const point of points) {
       const p = readCoordinate(point);
@@ -1391,6 +1682,7 @@
   }
 
   async function fetchOsmIcCellV070(point) {
+    if (IC_DISCOVERY_NETWORK_DISABLED) return [];
     const cellKey = `${(Math.round(point.lat * 20) / 20).toFixed(2)}:${(Math.round(point.lng * 20) / 20).toFixed(2)}`;
     if (OSM_CELL_CACHE.has(cellKey)) return OSM_CELL_CACHE.get(cellKey);
     const box = bboxAround(point, OSM_DISCOVERY_RADIUS_KM);
@@ -1400,7 +1692,7 @@
       try {
         const controller = new AbortController();
         const timeout = window.setTimeout(() => controller.abort(), 13_000);
-        recordApiUsage('osmRequests', 1, 'overpass');
+        incrementApiUsage('overpass', 1);
         const response = await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
@@ -1451,7 +1743,7 @@
   }
 
   function dedupeIcCandidatesV070(candidates) {
-    const rank = { RETAINED: 5, NAVITIME_IC: 4, CACHE: 3, OSM: 2, BUILTIN: 1 };
+    const rank = { RETAINED: 6, NATIONAL: 5, NAVITIME_IC: 4, CACHE: 3, OSM: 2, BUILTIN: 1 };
     const byName = new Map();
     for (const candidate of candidates || []) {
       if (!candidate?.name) continue;
@@ -1484,9 +1776,9 @@
 
     // Keep matrix size bounded. Candidates closest to the observed route are
     // preferred, but named built-in entries remain available as a safety net.
-    if (local.length > 70) {
+    if (local.length > NATIONAL_IC_RECOVERY_LIMIT) {
       local = local.sort((a, b) => (Number(a.corridorDistanceMeters ?? 99_000) - Number(b.corridorDistanceMeters ?? 99_000))
-        || (a.localDurationMs - b.localDurationMs)).slice(0, 70);
+        || (a.localDurationMs - b.localDurationMs)).slice(0, NATIONAL_IC_RECOVERY_LIMIT);
     }
 
     const fastApprox = await attachFastMatrixApproxChunkedV070(RouteMatrix, local, destination, now);
@@ -2303,6 +2595,7 @@
   }
 
   async function fetchNavitimeIcSearch({ apiKey, coord, radiusMeters = 10_000 }) {
+    if (IC_DISCOVERY_NETWORK_DISABLED) return [];
     if (!apiKey || !canUseNavitime()) throw new Error('NAVITIME補助は現在利用できません。');
     const cacheKey = `${coord.lat.toFixed(2)},${coord.lng.toFixed(2)}:${Math.round(radiusMeters)}`;
     if (NAVITIME_IC_CACHE.has(cacheKey)) return NAVITIME_IC_CACHE.get(cacheKey);
@@ -2317,7 +2610,7 @@
 
     let response;
     try {
-      recordApiUsage('navitimeIcRequests', 1, 'navitime_ic');
+      incrementApiUsage('navitimeIc', 1);
       response = await fetch(`${NAVITIME_IC_URL}?${params.toString()}`, {
         method: 'GET',
         headers: {
@@ -2380,7 +2673,7 @@
       fields: ['condition', 'durationMillis', 'distanceMeters'],
     };
     applyFutureDepartureTime(request, departureTime);
-    const { matrix } = await trackedComputeRouteMatrix(RouteMatrix, request, 'local_to_ic_matrix');
+    const { matrix } = await trackedComputeRouteMatrix(RouteMatrix, request);
     const items = matrix?.rows?.[0]?.items || [];
     return candidates.map((candidate, index) => {
       const item = items[index];
@@ -2406,7 +2699,7 @@
       fields: ['durationMillis', 'distanceMeters'],
     };
     applyFutureDepartureTime(request, departureTime);
-    const { matrix } = await trackedComputeRouteMatrix(RouteMatrix, request, 'ic_to_destination_matrix');
+    const { matrix } = await trackedComputeRouteMatrix(RouteMatrix, request);
     const rows = matrix?.rows || [];
     return candidates.map((candidate, index) => {
       const item = rows[index]?.items?.[0];
@@ -2629,7 +2922,7 @@
       },
     };
     applyFutureDepartureTime(request, departureTime);
-    const result = await trackedComputeRoutes(Route, request, 'local_leg_exact');
+    const result = await trackedComputeRoutes(Route, request);
     return result.routes?.[0] || null;
   }
 
@@ -2821,6 +3114,7 @@
   }
 
   async function discoverInterchangesAlongRoute(routePath, corridorRadiusKm) {
+    if (IC_DISCOVERY_NETWORK_DISABLED) return [];
     const samples = sampleRouteForOverpass(routePath, corridorRadiusKm);
     const boxes = samples.map((point) => bboxAround(point, corridorRadiusKm));
     const query = buildOverpassIcQuery(boxes);
@@ -2828,7 +3122,6 @@
 
     for (const endpoint of OVERPASS_ENDPOINTS) {
       try {
-        recordApiUsage('osmRequests', 1, 'overpass');
         const response = await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
@@ -3062,7 +3355,7 @@
       request.departureTime = departureTime;
     }
 
-    const result = await trackedComputeRoutes(Route, request, includeTolls ? 'fast_leg_tolls' : 'fast_leg_exact');
+    const result = await trackedComputeRoutes(Route, request);
     return result.routes?.[0] || null;
   }
 
@@ -3206,121 +3499,6 @@
     return manual || null;
   }
 
-  function emptyApiUsageCounters() {
-    return {
-      googleRoutesProRequests: 0,
-      googleRoutesEnterpriseRequests: 0,
-      googleMatrixProElements: 0,
-      navitimeIcRequests: 0,
-      navitimeFareRequests: 0,
-      osmRequests: 0,
-    };
-  }
-
-  function loadApiUsageLifetime() {
-    try {
-      const parsed = JSON.parse(safeStorageGet(STORAGE_KEY_API_USAGE) || '{}');
-      return { ...emptyApiUsageCounters(), ...parsed };
-    } catch (_) {
-      return emptyApiUsageCounters();
-    }
-  }
-
-  function persistApiUsageLifetime() {
-    safeStorageSet(STORAGE_KEY_API_USAGE, JSON.stringify(apiUsageLifetime));
-  }
-
-  function addUsage(target, kind, amount) {
-    if (!target || !(kind in target)) return;
-    target[kind] = Number(target[kind] || 0) + Number(amount || 0);
-  }
-
-  function recordApiUsage(kind, amount = 1, label = '') {
-    addUsage(apiUsageSession, kind, amount);
-    addUsage(apiUsageLifetime, kind, amount);
-    if (apiUsageCurrentCycle) {
-      addUsage(apiUsageCurrentCycle.counters, kind, amount);
-      if (label) apiUsageCurrentCycle.events.push({ kind, amount, label });
-    }
-    persistApiUsageLifetime();
-    refreshApiUsageUi();
-  }
-
-  function beginApiUsageCycle(source) {
-    apiUsageCurrentCycle = {
-      source,
-      startedAt: new Date(),
-      counters: emptyApiUsageCounters(),
-      events: [],
-    };
-    refreshApiUsageUi();
-  }
-
-  function endApiUsageCycle(resultMode = 'unknown') {
-    if (!apiUsageCurrentCycle) return;
-    apiUsageLastCycle = {
-      ...apiUsageCurrentCycle,
-      resultMode,
-      endedAt: new Date(),
-    };
-    apiUsageCurrentCycle = null;
-    refreshApiUsageUi();
-  }
-
-  function resetApiUsageCounters() {
-    apiUsageLifetime = emptyApiUsageCounters();
-    apiUsageSession = emptyApiUsageCounters();
-    apiUsageCurrentCycle = null;
-    apiUsageLastCycle = null;
-    safeStorageRemove(STORAGE_KEY_API_USAGE);
-    refreshApiUsageUi();
-  }
-
-  function formatApiUsageCounters(c) {
-    const x = c || emptyApiUsageCounters();
-    return [
-      `Google Routes Pro: ${Number(x.googleRoutesProRequests || 0).toLocaleString('ja-JP')} request`,
-      `Google Routes Enterprise (TOLLS): ${Number(x.googleRoutesEnterpriseRequests || 0).toLocaleString('ja-JP')} request`,
-      `Google Route Matrix Pro: ${Number(x.googleMatrixProElements || 0).toLocaleString('ja-JP')} element`,
-      `NAVITIME IC検索: ${Number(x.navitimeIcRequests || 0).toLocaleString('ja-JP')} request`,
-      `NAVITIME 料金: ${Number(x.navitimeFareRequests || 0).toLocaleString('ja-JP')} request`,
-      `OpenStreetMap / Overpass: ${Number(x.osmRequests || 0).toLocaleString('ja-JP')} request`,
-    ];
-  }
-
-  function refreshApiUsageUi() {
-    if (!els.apiUsageDetail) return;
-    const lines = ['Deadline Navi API使用量（アプリ内計測）'];
-    if (apiUsageCurrentCycle) {
-      lines.push('', `計算中: ${apiUsageCurrentCycle.source}`);
-      lines.push(...formatApiUsageCounters(apiUsageCurrentCycle.counters).map((x) => `  ${x}`));
-    } else if (apiUsageLastCycle) {
-      lines.push('', `直近1計算: ${apiUsageLastCycle.source} / ${apiUsageLastCycle.resultMode}`);
-      lines.push(...formatApiUsageCounters(apiUsageLastCycle.counters).map((x) => `  ${x}`));
-    } else {
-      lines.push('', '直近1計算: まだありません');
-    }
-    lines.push('', 'このページを開いてから:');
-    lines.push(...formatApiUsageCounters(apiUsageSession).map((x) => `  ${x}`));
-    lines.push('', 'この端末の累計（v0.7.1以降）:');
-    lines.push(...formatApiUsageCounters(apiUsageLifetime).map((x) => `  ${x}`));
-    els.apiUsageDetail.textContent = lines.join('\n');
-  }
-
-  async function trackedComputeRoutes(Route, request, label = '') {
-    const enterprise = Array.isArray(request?.extraComputations) && request.extraComputations.includes('TOLLS');
-    recordApiUsage(enterprise ? 'googleRoutesEnterpriseRequests' : 'googleRoutesProRequests', 1, label);
-    return Route.computeRoutes(request);
-  }
-
-  async function trackedComputeRouteMatrix(RouteMatrix, request, label = '') {
-    const origins = Array.isArray(request?.origins) ? request.origins.length : 0;
-    const destinations = Array.isArray(request?.destinations) ? request.destinations.length : 0;
-    const elements = Math.max(0, origins * destinations);
-    recordApiUsage('googleMatrixProElements', elements, label);
-    return RouteMatrix.computeRouteMatrix(request);
-  }
-
   async function diagnoseGoogleApi() {
     const key = getApiKey();
     const box = els.googleDiagResult;
@@ -3371,7 +3549,7 @@
         travelMode: 'DRIVING',
         routingPreference: 'TRAFFIC_AWARE',
         fields: ['durationMillis', 'distanceMeters'],
-      }, 'diagnostic_route');
+      });
       const route = test?.routes?.[0];
       if (!route) throw new Error('診断用ルートが返りませんでした。');
       lines.push(`   OK: ${Math.round(Number(route.distanceMeters || 0))}m / ${Math.round(Number(route.durationMillis || 0) / 1000)}秒`);
@@ -3603,7 +3781,7 @@
 
     let response;
     try {
-      recordApiUsage('navitimeFareRequests', 1, 'navitime_fare');
+      incrementApiUsage('navitimeRoute', 1);
       response = await fetch(`${NAVITIME_ROUTE_URL}?${params.toString()}`, {
         method: 'GET',
         headers: {
