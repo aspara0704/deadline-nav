@@ -9,13 +9,15 @@
   const STORAGE_KEY_NATIONAL_IC_LEGACY = 'deadlineNavi.nationalIcV071';
   const STORAGE_KEY_NATIONAL_IC_META_LEGACY = 'deadlineNavi.nationalIcMetaV071';
   const STORAGE_KEY_API_USAGE = 'deadlineNavi.apiUsageV071';
-  const CURRENT_APP_VERSION = '0.7.2';
-  const LOCAL_IC_DATA_URL = './ic-data.min.json?v=072-local1';
+  const CURRENT_APP_VERSION = '0.7.3';
+  const LOCAL_IC_DATA_URL = './ic-data.min.json?v=073';
   const LOCAL_IC_MIN_COMPLETE_COUNT = 300;
   const IC_DISCOVERY_NETWORK_DISABLED = true;
-  const NATIONAL_IC_PREFILTER_LIMIT = 18;
-  const NATIONAL_IC_RECOVERY_LIMIT = 30;
+  const NATIONAL_IC_PREFILTER_LIMIT = 12;
+  const NATIONAL_IC_RECOVERY_LIMIT = 18;
   const NATIONAL_IC_CORRIDOR_M = 65_000;
+  const V073_BUILTIN_FALLBACK_LIMIT = 8;
+  const V073_MATRIX_ELEMENT_BUDGET = 99;
   const GOOGLE_FREE_CAP_PRO = 5_000;
   const GOOGLE_FREE_CAP_ENTERPRISE = 1_000;
   const GOOGLE_PRICE_PRO_PER_1000_USD = 10;
@@ -169,6 +171,7 @@
   let apiUsageMonth = createEmptyApiUsage();
   let apiUsageSession = createEmptyApiUsage();
   let apiUsageCurrent = createEmptyApiUsage();
+  let candidateDiagCurrent = createEmptyCandidateDiagnostic();
   const autoMonitor = {
     active: false,
     watchId: null,
@@ -900,6 +903,33 @@
     return 2 * R * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
   }
 
+  function createEmptyCandidateDiagnostic() {
+    return {
+      initial: null,
+      recovery: null,
+      fallback: null,
+    };
+  }
+
+  function recordCandidateDiagnostic(phase, stats) {
+    candidateDiagCurrent[phase] = stats ? { ...stats } : null;
+    renderApiUsageDiagnostic();
+  }
+
+  function formatCandidateDiagnostic() {
+    const rows = ['候補絞り込み'];
+    const labels = { initial: '通常', recovery: '回復', fallback: '最終' };
+    let any = false;
+    for (const phase of ['initial', 'recovery', 'fallback']) {
+      const s = candidateDiagCurrent[phase];
+      if (!s) continue;
+      any = true;
+      rows.push(`  ${labels[phase]}: 発見 ${s.discovered} → Matrix送信 ${s.sent} → 概算safe ${s.approxSafe} → 精査safe ${s.safe}`);
+    }
+    if (!any) rows.push('  まだ候補評価を実行していません');
+    return rows.join('\n');
+  }
+
   function createEmptyApiUsage() {
     return {
       googleRoutesPro: 0,
@@ -933,6 +963,7 @@
 
   function beginApiUsageCalculation() {
     apiUsageCurrent = createEmptyApiUsage();
+    candidateDiagCurrent = createEmptyCandidateDiagnostic();
     renderApiUsageDiagnostic();
   }
 
@@ -986,6 +1017,7 @@
         : '全国ICカタログ: 未読込';
     els.apiUsageDiag.textContent = [
       formatUsageBlock('今回の計算', apiUsageCurrent),
+      formatCandidateDiagnostic(),
       '',
       formatUsageBlock('このブラウザ・今月', apiUsageMonth),
       `  無料枠目安: Routes Pro ${apiUsageMonth.googleRoutesPro}/${GOOGLE_FREE_CAP_PRO}, Matrix Pro ${apiUsageMonth.googleMatrixElements}/${GOOGLE_FREE_CAP_PRO}, Enterprise ${apiUsageMonth.googleRoutesEnterprise}/${GOOGLE_FREE_CAP_ENTERPRISE}`,
@@ -1005,8 +1037,12 @@
   async function trackedComputeRouteMatrix(RouteMatrix, request) {
     const origins = Array.isArray(request?.origins) ? request.origins.length : 0;
     const destinations = Array.isArray(request?.destinations) ? request.destinations.length : 0;
+    const elements = origins * destinations;
+    if (calculationInFlight && apiUsageCurrent.googleMatrixElements + elements > V073_MATRIX_ELEMENT_BUDGET) {
+      throw new Error(`Route Matrixの1計算上限 ${V073_MATRIX_ELEMENT_BUDGET} 要素を超えるため、この探索を停止しました。`);
+    }
     incrementApiUsage('googleMatrixRequests', 1);
-    incrementApiUsage('googleMatrixElements', origins * destinations);
+    incrementApiUsage('googleMatrixElements', elements);
     return RouteMatrix.computeRouteMatrix(request);
   }
 
@@ -1423,7 +1459,9 @@
       localDirectDurationMs,
       normalDirectDurationMs,
       candidates: pool,
+      matrixCandidateLimit: NATIONAL_IC_PREFILTER_LIMIT,
     });
+    recordCandidateDiagnostic('initial', evaluated.stats);
 
     // Invariant: if Google's recommended route is within the practical deadline,
     // we must not conclude that there is no feasible highway entrance merely
@@ -1445,7 +1483,10 @@
         destination,
         recovery: true,
       });
-      pool = dedupeIcCandidatesV070([...pool, ...recoveryPool]);
+      pool = prefilterDiscoveredCandidatesV071(
+        dedupeIcCandidatesV070([...pool, ...recoveryPool]),
+        NATIONAL_IC_RECOVERY_LIMIT,
+      );
       evaluated = await evaluateCandidatePoolV070({
         Route,
         RouteMatrix,
@@ -1456,7 +1497,9 @@
         localDirectDurationMs,
         normalDirectDurationMs,
         candidates: pool,
+        matrixCandidateLimit: NATIONAL_IC_RECOVERY_LIMIT,
       });
+      recordCandidateDiagnostic('recovery', evaluated.stats);
     }
 
     if (!evaluated.safe.length) {
@@ -1465,7 +1508,10 @@
         ...builtinCandidatesForRouteV070(normalPath),
       ]);
       if (builtinFallback.length) {
-        pool = dedupeIcCandidatesV070([...pool, ...builtinFallback]);
+        pool = prefilterDiscoveredCandidatesV071(
+          dedupeIcCandidatesV070([...pool, ...builtinFallback]),
+          V073_BUILTIN_FALLBACK_LIMIT,
+        );
         evaluated = await evaluateCandidatePoolV070({
           Route,
           RouteMatrix,
@@ -1476,7 +1522,9 @@
           localDirectDurationMs,
           normalDirectDurationMs,
           candidates: pool,
+          matrixCandidateLimit: V073_BUILTIN_FALLBACK_LIMIT,
         });
+        recordCandidateDiagnostic('fallback', evaluated.stats);
       }
     }
 
@@ -1774,24 +1822,20 @@
     localDirectDurationMs,
     normalDirectDurationMs,
     candidates,
+    matrixCandidateLimit = NATIONAL_IC_PREFILTER_LIMIT,
   }) {
-    if (!candidates.length) return { exact: [], safe: [] };
-    let local = (await attachLocalMatrixChunked(RouteMatrix, origin, candidates, now))
+    const discoveredCount = candidates.length;
+    const matrixCandidates = prefilterDiscoveredCandidatesV071(candidates, matrixCandidateLimit);
+    if (!matrixCandidates.length) return { exact: [], safe: [], stats: { discovered: discoveredCount, sent: 0, approxSafe: 0, safe: 0 } };
+    let local = (await attachLocalMatrixChunked(RouteMatrix, origin, matrixCandidates, now))
       .filter((candidate) => candidate.exists && Number.isFinite(candidate.localDurationMs) && candidate.localDurationMs > 0)
       .filter((candidate) => candidate.localDurationMs <= Math.max(localDirectDurationMs * 1.12, normalDirectDurationMs + 3 * 60 * 60_000));
-    if (!local.length) return { exact: [], safe: [] };
-
-    // Keep matrix size bounded. Candidates closest to the observed route are
-    // preferred, but named built-in entries remain available as a safety net.
-    if (local.length > NATIONAL_IC_RECOVERY_LIMIT) {
-      local = local.sort((a, b) => (Number(a.corridorDistanceMeters ?? 99_000) - Number(b.corridorDistanceMeters ?? 99_000))
-        || (a.localDurationMs - b.localDurationMs)).slice(0, NATIONAL_IC_RECOVERY_LIMIT);
-    }
+    if (!local.length) return { exact: [], safe: [], stats: { discovered: discoveredCount, sent: matrixCandidates.length, approxSafe: 0, safe: 0 } };
 
     const fastApprox = await attachFastMatrixApproxChunkedV070(RouteMatrix, local, destination, now);
     const combined = combineApproximateMatrixResults(local, fastApprox, now, practicalDeadline)
       .filter((item) => item.fastApproxExists && item.approxTotalDurationMs > 0);
-    if (!combined.length) return { exact: [], safe: [] };
+    if (!combined.length) return { exact: [], safe: [], stats: { discovered: discoveredCount, sent: matrixCandidates.length, approxSafe: 0, safe: 0 } };
 
     const byDeadline = combined.slice().sort((a, b) => {
       const ag = Math.abs(practicalDeadline.getTime() - a.approxEta.getTime());
@@ -1836,7 +1880,16 @@
       safe = exact.filter((item) => item.safe);
     }
 
-    return { exact: dedupeCandidates(exact), safe: dedupeCandidates(safe) };
+    return {
+      exact: dedupeCandidates(exact),
+      safe: dedupeCandidates(safe),
+      stats: {
+        discovered: discoveredCount,
+        sent: matrixCandidates.length,
+        approxSafe: combined.filter((item) => item.approxSafe).length,
+        safe: dedupeCandidates(safe).length,
+      },
+    };
   }
 
   async function attachFastMatrixApproxChunkedV070(RouteMatrix, candidates, destination, departureTime) {
