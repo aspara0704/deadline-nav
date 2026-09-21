@@ -20,7 +20,7 @@
         <h1>間に合うなら、まだ下道で。</h1>
         <p class="brand-description">Deadline Naviは、高速道路へ切り替える最適なタイミングをリアルタイムに判断します。</p>
       </div>
-      <span class="version-chip">v0.6.3</span>
+      <span class="version-chip">v0.6.5</span>
     </header>
 
     <section class="card trip-card">
@@ -156,20 +156,20 @@
         <div>
           <p class="section-kicker">Drive</p>
           <h2>走行中モニター</h2>
-          <p class="muted">現在地に応じて自動再計算し、推奨入口とナビを切り替えるタイミングを音声で知らせます。</p>
+          <p class="muted">現在地と交通状況を追跡し、高速へ切り替えるタイミングを音声で知らせます。</p>
         </div>
         <span id="autoStatus" class="badge badge-neutral">停止中</span>
       </div>
 
       <div class="monitor-actions">
-        <button id="autoStart" class="button primary" type="button">自動監視を開始</button>
-        <button id="autoStop" class="button secondary" type="button" disabled>停止</button>
+        <button id="autoStart" class="button primary" type="button">音声案内を開始</button>
+        <button id="autoStop" class="button secondary" type="button" disabled>音声案内を終了</button>
       </div>
 
       <div class="monitor-options">
         <label class="voice-toggle">
           <input id="voiceEnabled" type="checkbox" checked />
-          <span>推奨入口とナビ変更時機を音声通知</span>
+          <span>重要な変化をすぐ音声で知らせる</span>
         </label>
         <button id="voiceTest" class="button secondary compact-button" type="button">音声テスト</button>
       </div>
@@ -190,6 +190,14 @@
             <select id="voiceSelect">
               <option value="auto-female">女性音声を自動選択</option>
             </select>
+          </label>
+          <label class="field full voice-select-field">
+            <span>定期アナウンスの間隔</span>
+            <div class="voice-interval-row">
+              <input id="voiceInterval" type="number" min="1" max="60" step="1" value="10" inputmode="numeric" />
+              <span>分ごと</span>
+            </div>
+            <small>1〜60分を1分刻みで設定できます。重要な変化は、この間隔を待たずに案内します。</small>
           </label>
           <p id="voiceStatus" class="hint">端末の日本語音声を確認中…</p>
         </section>
@@ -248,7 +256,7 @@
     </details>
 
     <footer>
-      <p>Deadline Navi v0.6.3 — 運転中は画面を操作せず、安全な場所で設定してください。</p>
+      <p>Deadline Navi v0.6.5 — 運転中は画面を操作せず、安全な場所で設定してください。</p>
     </footer>
   </main>
 

@@ -307,3 +307,9 @@ body { background: #f4f6fa; }
 @media (max-width: 560px) {
   .brand-description { font-size: 13px; }
 }
+
+
+/* v0.6.5 voice guidance */
+.voice-interval-row { display:flex; align-items:center; gap:10px; }
+.voice-interval-row input { width:100px; flex:0 0 100px; }
+.voice-interval-row span { color:var(--muted); font-size:14px; font-weight:650; }

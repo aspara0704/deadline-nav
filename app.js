@@ -107,6 +107,7 @@
     autoStop: $('autoStop'),
     autoStatus: $('autoStatus'),
     voiceEnabled: $('voiceEnabled'),
+    voiceInterval: $('voiceInterval'),
     voiceTest: $('voiceTest'),
     voiceSelect: $('voiceSelect'),
     voiceStatus: $('voiceStatus'),
@@ -129,6 +130,8 @@
     lastCalcAt: 0,
     lastCalcPosition: null,
     wakeLock: null,
+    lastAnnouncementAt: 0,
+    speechPrimed: false,
   };
 
   init();
@@ -151,6 +154,10 @@
     els.autoStop.addEventListener('click', stopAutoMonitor);
     els.voiceTest.addEventListener('click', () => speakJapanese('音声案内のテストです。現在の設定で読み上げています。'));
     els.voiceEnabled.addEventListener('change', persistFormState);
+    els.voiceInterval?.addEventListener('change', () => {
+      els.voiceInterval.value = String(clampNumber(Number(els.voiceInterval.value), 1, 60, 10));
+      persistFormState();
+    });
     els.voiceSelect?.addEventListener('change', () => { persistFormState(); populateSpeechVoiceOptions(); });
     setupSpeechVoices();
     document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -180,6 +187,7 @@
       if (saved.debugNow) els.debugNow.value = saved.debugNow;
       if (saved.manualOrigin) els.manualOrigin.value = saved.manualOrigin;
       if (typeof saved.voiceEnabled === 'boolean') els.voiceEnabled.checked = saved.voiceEnabled;
+      if (Number.isFinite(saved.voiceInterval)) els.voiceInterval.value = clampNumber(saved.voiceInterval, 1, 60, 10);
       if (saved.voiceChoice && els.voiceSelect) els.voiceSelect.dataset.savedChoice = saved.voiceChoice;
     } catch (_) {
       // Ignore malformed local state.
@@ -195,6 +203,7 @@
       debugNow: els.debugNow.value,
       manualOrigin: els.manualOrigin.value.trim(),
       voiceEnabled: Boolean(els.voiceEnabled?.checked),
+      voiceInterval: clampNumber(Number(els.voiceInterval?.value), 1, 60, 10),
       voiceChoice: els.voiceSelect?.value || 'auto-female',
     };
     safeStorageSet(STORAGE_KEY_FORM, JSON.stringify(payload));
@@ -354,10 +363,17 @@
       return;
     }
 
+    // The start tap is the one reliable user gesture we have on iPhone.
+    // Prime SpeechSynthesis synchronously here, before the first await/GPS/API callback.
+    // Without this, iOS Safari/PWA can silently suppress later automatic speech.
+    if (els.voiceEnabled) els.voiceEnabled.checked = true;
+    persistFormState();
     autoMonitor.active = true;
     autoMonitor.lastCalcAt = 0;
     autoMonitor.lastCalcPosition = null;
+    autoMonitor.lastAnnouncementAt = 0;
     lastDecisionSnapshot = null;
+    primeSpeechFromUserGesture();
     updateAutoUi('現在地を取得中…');
     await requestWakeLock();
 
@@ -384,6 +400,7 @@
 
     autoMonitor.timerId = window.setInterval(() => {
       maybeAutoRecalculate('timer');
+      maybePeriodicAnnouncement();
       updateAutoUi();
     }, 10_000);
   }
@@ -396,6 +413,7 @@
     autoMonitor.watchId = null;
     autoMonitor.timerId = null;
     autoMonitor.active = false;
+    autoMonitor.speechPrimed = false;
     if (autoMonitor.wakeLock) {
       try { await autoMonitor.wakeLock.release(); } catch (_) { /* no-op */ }
       autoMonitor.wakeLock = null;
@@ -471,7 +489,7 @@
     els.autoStop.disabled = !autoMonitor.active;
     if (!autoMonitor.active) {
       els.autoStatus.textContent = message || '停止中';
-      els.monitorDetail.textContent = '開始するとGPSを継続取得します。通常は5分または5km、判断時刻が近づくと3分、直前だけ1分を目安に再計算します。';
+      els.monitorDetail.textContent = '開始すると現在地を追跡し、必要なタイミングで経路を再計算します。定期アナウンスの間隔は設定から変更できます。';
       return;
     }
 
@@ -479,10 +497,46 @@
     const elapsed = autoMonitor.lastCalcAt ? Date.now() - autoMonitor.lastCalcAt : 0;
     const remainMs = Math.max(0, policy.intervalMs - elapsed);
     const mode = policy.level === 'critical' ? '切替直前' : policy.level === 'approach' ? '切替接近' : '通常';
-    els.autoStatus.textContent = message || `監視中・${mode}`;
+    els.autoStatus.textContent = message || `音声案内中・${mode}`;
     els.monitorDetail.textContent = autoMonitor.lastCalcAt
-      ? `次の時間再計算まで約${Math.max(0, Math.ceil(remainMs / 60_000))}分。推奨候補の変更や、ナビ変更の目安が近づいたときに音声通知します。`
+      ? `経路は必要なタイミングで自動更新します。定期アナウンスは${getVoiceIntervalMinutes()}分ごとです。重要な変化は待たずに案内します。`
       : '最初のGPS取得後に自動計算します。';
+  }
+
+  function getVoiceIntervalMinutes() {
+    return clampNumber(Number(els.voiceInterval?.value), 1, 60, 10);
+  }
+
+  function maybePeriodicAnnouncement() {
+    if (!autoMonitor.active || !els.voiceEnabled?.checked || !lastDecisionSnapshot) return;
+    if (lastDecisionSnapshot.mode === 'error' || lastDecisionSnapshot.mode === 'incomplete') return;
+    if (!autoMonitor.speechPrimed) return;
+    const intervalMs = getVoiceIntervalMinutes() * 60_000;
+    const now = Date.now();
+    if (autoMonitor.lastAnnouncementAt && now - autoMonitor.lastAnnouncementAt < intervalMs) return;
+    if (window.speechSynthesis?.speaking) return;
+    const text = buildPeriodicVoiceMessage(lastDecisionSnapshot);
+    if (text) speakJapanese(text, { priority: 'periodic' });
+  }
+
+  function buildPeriodicVoiceMessage(snapshot) {
+    if (!snapshot) return '';
+    if (snapshot.mode === 'no_toll') {
+      const eta = snapshot.localEta instanceof Date ? formatTimeForSpeech(snapshot.localEta) : '';
+      const slackMin = Number.isFinite(snapshot.localSlackMs)
+        ? Math.max(0, Math.floor(snapshot.localSlackMs / 60_000))
+        : null;
+      const etaText = eta ? `下道での到着予想は${eta}ごろです。` : '';
+      const slackText = slackMin !== null ? `到着条件まで約${slackMin}分の余裕があります。` : '';
+      return `まだ下道で大丈夫です。${etaText}${slackText}`;
+    }
+    if (snapshot.mode === 'impossible') {
+      return '現在の交通状況では、Google推奨ルートでも到着期限を超える見込みです。';
+    }
+    if (snapshot.mode === 'candidate' && snapshot.candidate) {
+      return buildCandidateVoiceMessage(snapshot.candidate, 'periodic');
+    }
+    return '';
   }
 
   function finalizeCalculationSnapshot(snapshot, source) {
@@ -535,7 +589,7 @@
   function buildCandidateVoiceMessage(candidate, context = 'changed') {
     const toll = Number.isFinite(candidate.toll?.yen) ? `${Math.round(candidate.toll.yen)}円` : '料金は確認中です';
     const eta = candidate.destinationEta instanceof Date ? formatTimeForSpeech(candidate.destinationEta) : '';
-    const prefix = context === 'initial'
+    const prefix = (context === 'initial' || context === 'periodic')
       ? `現在のおすすめは、${candidate.name}です。`
       : context === 'required'
         ? `高速への切り替えが必要です。おすすめは、${candidate.name}です。`
@@ -649,13 +703,52 @@
     })[0];
   }
 
-  function speakJapanese(text) {
-    if (!text || !('speechSynthesis' in window)) {
-      showError('このブラウザでは音声読み上げを利用できません。');
-      return;
+  function primeSpeechFromUserGesture() {
+    if (!('speechSynthesis' in window)) {
+      if (els.voiceStatus) els.voiceStatus.textContent = 'このブラウザでは音声読み上げを利用できません。';
+      return false;
     }
     try {
       window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance('音声案内を開始します。');
+      utterance.lang = 'ja-JP';
+      utterance.rate = 0.90;
+      utterance.pitch = 1.03;
+      utterance.volume = 1.0;
+      const voice = chooseJapaneseVoice();
+      if (voice) utterance.voice = voice;
+      utterance.onstart = () => {
+        autoMonitor.speechPrimed = true;
+        autoMonitor.lastAnnouncementAt = Date.now();
+        if (els.voiceStatus) els.voiceStatus.textContent = voice
+          ? `使用中：${voice.name}`
+          : '音声案内を利用できます。';
+      };
+      utterance.onerror = (event) => {
+        autoMonitor.speechPrimed = false;
+        const reason = event?.error || 'unknown';
+        if (els.voiceStatus) els.voiceStatus.textContent = `音声を開始できませんでした（${reason}）。「音声案内を開始」をもう一度タップしてください。`;
+      };
+      window.speechSynthesis.speak(utterance);
+      // Mark as primed optimistically; onerror will revert this. Some Safari builds
+      // do not reliably fire onstart even when speech is audible.
+      autoMonitor.speechPrimed = true;
+      autoMonitor.lastAnnouncementAt = Date.now();
+      return true;
+    } catch (error) {
+      autoMonitor.speechPrimed = false;
+      console.warn('speechSynthesis priming failed:', error);
+      return false;
+    }
+  }
+
+  function speakJapanese(text, options = {}) {
+    if (!text || !('speechSynthesis' in window)) {
+      showError('このブラウザでは音声読み上げを利用できません。');
+      return false;
+    }
+    try {
+      if (options.priority !== 'periodic') window.speechSynthesis.cancel();
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.lang = 'ja-JP';
       utterance.rate = 0.90;
@@ -663,9 +756,23 @@
       utterance.volume = 1.0;
       const voice = chooseJapaneseVoice();
       if (voice) utterance.voice = voice;
+      utterance.onstart = () => {
+        if (autoMonitor.active) autoMonitor.lastAnnouncementAt = Date.now();
+      };
+      utterance.onerror = (event) => {
+        const reason = event?.error || 'unknown';
+        console.warn('speechSynthesis utterance error:', reason, event);
+        if (reason === 'not-allowed' || reason === 'audio-busy') {
+          autoMonitor.speechPrimed = false;
+          if (els.voiceStatus) els.voiceStatus.textContent = 'iPhoneが自動音声を停止しました。「音声案内を終了」→「音声案内を開始」の順でタップしてください。';
+        }
+      };
       window.speechSynthesis.speak(utterance);
+      if (autoMonitor.active) autoMonitor.lastAnnouncementAt = Date.now();
+      return true;
     } catch (error) {
       console.warn('speechSynthesis failed:', error);
+      return false;
     }
   }
 
