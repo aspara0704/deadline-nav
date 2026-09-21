@@ -9,8 +9,8 @@
   const STORAGE_KEY_NATIONAL_IC_LEGACY = 'deadlineNavi.nationalIcV071';
   const STORAGE_KEY_NATIONAL_IC_META_LEGACY = 'deadlineNavi.nationalIcMetaV071';
   const STORAGE_KEY_API_USAGE = 'deadlineNavi.apiUsageV071';
-  const CURRENT_APP_VERSION = '0.7.4';
-  const LOCAL_IC_DATA_URL = './ic-data.min.json?v=074';
+  const CURRENT_APP_VERSION = '0.7.5';
+  const LOCAL_IC_DATA_URL = './ic-data.min.json?v=075';
   const LOCAL_IC_MIN_COMPLETE_COUNT = 300;
   const IC_DISCOVERY_NETWORK_DISABLED = true;
   const NATIONAL_IC_PREFILTER_LIMIT = 12;
@@ -95,6 +95,7 @@
     apiStatus: $('apiStatus'),
     googleDiag: $('googleDiag'),
     googleDiagResult: $('googleDiagResult'),
+    testLightweightUpdate: $('testLightweightUpdate'),
     navitimeApiKey: $('navitimeApiKey'),
     saveNavitimeApiKey: $('saveNavitimeApiKey'),
     navitimeStatus: $('navitimeStatus'),
@@ -173,6 +174,7 @@
   let apiUsageCurrent = createEmptyApiUsage();
   let candidateDiagCurrent = createEmptyCandidateDiagnostic();
   let evaluatedCandidateKeysCurrent = new Set();
+  let autoUpdateDiagCurrent = '未実行';
   const autoMonitor = {
     active: false,
     watchId: null,
@@ -196,6 +198,7 @@
 
     els.saveApiKey.addEventListener('click', saveApiKey);
     els.googleDiag?.addEventListener('click', diagnoseGoogleApi);
+    els.testLightweightUpdate?.addEventListener('click', testLightweightUpdateV075);
     els.resetApiUsage?.addEventListener('click', resetApiUsageCounters);
     els.saveNavitimeApiKey.addEventListener('click', saveNavitimeApiKey);
     els.getLocation.addEventListener('click', requestLocation);
@@ -966,6 +969,7 @@
     apiUsageCurrent = createEmptyApiUsage();
     candidateDiagCurrent = createEmptyCandidateDiagnostic();
     evaluatedCandidateKeysCurrent = new Set();
+    autoUpdateDiagCurrent = '未実行';
     renderApiUsageDiagnostic();
   }
 
@@ -1019,6 +1023,7 @@
         : '全国ICカタログ: 未読込';
     els.apiUsageDiag.textContent = [
       formatUsageBlock('今回の計算', apiUsageCurrent),
+      `走行中更新: ${autoUpdateDiagCurrent}`,
       formatCandidateDiagnostic(),
       '',
       formatUsageBlock('このブラウザ・今月', apiUsageMonth),
@@ -1197,6 +1202,80 @@
     }
   }
 
+  function shouldUseLightweightCandidateV075(source, destination, snapshot, candidate, candidateDestination) {
+    return source === 'auto'
+      && snapshot?.mode === 'candidate'
+      && Boolean(candidate?.waypoint)
+      && candidateDestination === destination;
+  }
+
+  async function evaluateRetainedCandidateV075({
+    Route,
+    origin,
+    destination,
+    now,
+    practicalDeadline,
+    candidate,
+  }) {
+    try {
+      const localRoute = await computeLocalLeg(Route, origin, candidate.waypoint, now);
+      const localDurationMs = Number(localRoute?.durationMillis || 0);
+      if (!localDurationMs) return { safe: false, reason: '推奨ICまでの下道経路なし' };
+
+      const icArrival = new Date(now.getTime() + localDurationMs);
+      const fastRoute = await computeFastLeg(Route, candidate.waypoint, destination, icArrival);
+      const fastDurationMs = Number(fastRoute?.durationMillis || 0);
+      if (!fastDurationMs) return { safe: false, reason: '推奨ICから目的地への経路なし' };
+
+      const totalDurationMs = localDurationMs + fastDurationMs;
+      const destinationEta = new Date(now.getTime() + totalDurationMs);
+      const switchDeadline = new Date(practicalDeadline.getTime() - fastDurationMs);
+      const safe = destinationEta <= practicalDeadline;
+      if (!safe) return { safe: false, reason: '推奨ICでは到着条件を満たさない' };
+
+      const previousGuidance = candidate.navGuidance;
+      const navGuidance = previousGuidance
+        ? refreshNavGuidance(previousGuidance, now)
+        : fallbackNavGuidance({ ...candidate, icArrival, switchDeadline }, now);
+
+      return {
+        ...candidate,
+        failed: false,
+        localDurationMs,
+        localDistanceMeters: Number(localRoute?.distanceMeters || candidate.localDistanceMeters || 0),
+        fastDurationMs,
+        totalDurationMs,
+        icArrival,
+        destinationEta,
+        switchDeadline,
+        endpoints: routeEndpoints(fastRoute) || candidate.endpoints,
+        safe: true,
+        navGuidance,
+        lightweightCheckedAt: new Date(now),
+      };
+    } catch (error) {
+      console.warn('Lightweight retained-candidate check failed:', error);
+      return { safe: false, reason: '軽量確認エラー' };
+    }
+  }
+
+  async function testLightweightUpdateV075() {
+    showError('');
+    if (calculationInFlight) return;
+    const destination = els.destination.value.trim();
+    if (!shouldUseLightweightCandidateV075(
+      'auto',
+      destination,
+      lastDecisionSnapshot,
+      retainedCandidate,
+      retainedCandidateDestination,
+    )) {
+      showError('先に通常計算で高速入口候補を確定してください。');
+      return;
+    }
+    await calculate({ source: 'auto', suppressScroll: true, trigger: 'diagnostic-lightweight' });
+  }
+
   async function calculate(options = {}) {
     const source = options.source || 'manual';
     const suppressScroll = Boolean(options.suppressScroll || source === 'auto');
@@ -1221,6 +1300,7 @@
       return null;
     }
     const now = reference.date;
+    const practicalDeadline = new Date(deadline.getTime() - safetyMarginMin * 60_000);
 
     if (!apiKey) { calculationInFlight = false; showError('先にGoogle Maps APIキーを設定してください。'); return null; }
     if (!origin) { calculationInFlight = false; showError('「現在地を取得」するか、出発地を手入力してください。'); return null; }
@@ -1233,6 +1313,53 @@
 
     try {
       const { Route, RouteMatrix } = await loadGoogleRoutes(apiKey);
+
+      if (shouldUseLightweightCandidateV075(
+        source,
+        destination,
+        lastDecisionSnapshot,
+        retainedCandidate,
+        retainedCandidateDestination,
+      )) {
+        const lightweight = await evaluateRetainedCandidateV075({
+          Route,
+          origin,
+          destination,
+          now,
+          practicalDeadline,
+          candidate: retainedCandidate,
+        });
+        if (lightweight?.safe) {
+          autoUpdateDiagCurrent = `軽量確認成功: ${lightweight.name} を継続（全探索省略）`;
+          renderApiUsageDiagnostic();
+          els.candidateCount.textContent = '軽量確認 1件';
+          els.candidateStatus.textContent = `${lightweight.name} が引き続き到着条件を満たすことを確認しました。全国候補の再探索は省略しました。`;
+          renderSwitchSummary(lightweight, now, practicalDeadline);
+          const selectedKey = `IC:${lightweight.navitimeIcId || lightweight.id || lightweight.name}`;
+          const snapshot = {
+            mode: 'candidate',
+            key: selectedKey,
+            now,
+            practicalDeadline,
+            localEta: lastDecisionSnapshot?.localEta || null,
+            localSlackMs: lastDecisionSnapshot?.localSlackMs,
+            candidate: lightweight,
+            lightweight: true,
+          };
+          finalizeCalculationSnapshot(snapshot, source);
+          return snapshot;
+        }
+        autoUpdateDiagCurrent = lightweight?.reason
+          ? `軽量確認で再探索が必要（${lightweight.reason}）`
+          : '軽量確認で再探索が必要';
+        renderApiUsageDiagnostic();
+      } else if (source === 'auto') {
+        autoUpdateDiagCurrent = '推奨IC未確定のためフル探索';
+        renderApiUsageDiagnostic();
+      }
+      if (source !== 'auto') autoUpdateDiagCurrent = 'フル探索（手動計算）';
+      renderApiUsageDiagnostic();
+
       const baseRequest = {
         origin,
         destination,
@@ -1265,7 +1392,6 @@
       const localRoute = localResult.routes?.[0];
       if (!normalRoute || !localRoute) throw new Error('利用可能な経路が見つかりませんでした。');
 
-      const practicalDeadline = new Date(deadline.getTime() - safetyMarginMin * 60_000);
       renderResults({ normalRoute, localRoute, deadline, safetyMarginMin, now, reference, scroll: !suppressScroll });
 
       const localDirectDurationMs = Number(localRoute.durationMillis || 0);
