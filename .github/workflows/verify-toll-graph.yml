@@ -54,7 +54,7 @@ jobs:
               key=m.normalize_name(name)
               assert key in g['junctionIndex'] and g['junctionIndex'][key], (name,key)
           d,path=m.shortest_distance_between_junctions(g,'久御山南IC','枚方東IC')
-          assert d is not None and 4.5 < d < 9.0, d
+          assert d is not None and 5.8 < d < 7.4, d
           print('久御山南IC -> 枚方東IC access-aware graph distance km:',round(d,3))
           print('roads:',sorted({e.get('road') for e in path if e.get('road')}))
           print(json.dumps(g['meta'],ensure_ascii=False,indent=2))
@@ -75,7 +75,7 @@ jobs:
           q=json.loads(r.stdout)
           assert q['quality']=='estimate',q
           assert q['source']=='local-formula',q
-          assert 430 <= q['yen'] <= 550,q
+          assert 470 <= q['yen'] <= 500,q
           PY
       - uses: actions/upload-artifact@v4
         with:
