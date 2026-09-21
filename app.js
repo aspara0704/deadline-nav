@@ -4,12 +4,15 @@
   const STORAGE_KEY_API = 'deadlineNavi.googleMapsApiKey';
   const STORAGE_KEY_NAVITIME = 'deadlineNavi.navitimeRapidApiKey';
   const STORAGE_KEY_FORM = 'deadlineNavi.formV05';
-  const AUTO_NORMAL_INTERVAL_MS = 3 * 60_000;
-  const AUTO_URGENT_INTERVAL_MS = 60_000;
+  const AUTO_NORMAL_INTERVAL_MS = 5 * 60_000;
+  const AUTO_APPROACH_INTERVAL_MS = 3 * 60_000;
+  const AUTO_CRITICAL_INTERVAL_MS = 60_000;
   const AUTO_NORMAL_DISTANCE_M = 5_000;
-  const AUTO_URGENT_DISTANCE_M = 1_500;
-  const AUTO_MIN_INTERVAL_MS = 45_000;
-  const AUTO_URGENT_THRESHOLD_MS = 30 * 60_000;
+  const AUTO_APPROACH_DISTANCE_M = 3_000;
+  const AUTO_CRITICAL_DISTANCE_M = 1_000;
+  const AUTO_MIN_INTERVAL_MS = 60_000;
+  const AUTO_APPROACH_THRESHOLD_MS = 30 * 60_000;
+  const AUTO_CRITICAL_THRESHOLD_MS = 5 * 60_000;
   const NAV_GUIDANCE_RECALC_MS = 5 * 60_000;
   const NAV_GUIDANCE_SAMPLE_COUNT = 6;
   const NAV_GUIDANCE_PREPARE_MS = 15 * 60_000;
@@ -27,6 +30,10 @@
   const ACTUAL_BOUNDARY_ANCHORS = 8;
   const BOUNDARY_PRICE_NEIGHBORS = 6;
   const PRICE_SENTINEL_LIMIT_V046 = 2;
+  const RECOVERY_ROUTE_HORIZON_M = 140_000;
+  const RECOVERY_IC_SAMPLE_STEP_M = 16_000;
+  const RECOVERY_EXACT_LIMIT = 20;
+  const RECOVERY_FARE_LIMIT = 7;
   const COARSE_SAMPLE_LIMIT = 10;
   const DETAIL_MATRIX_LIMIT = 14;
   const DETAIL_EXACT_LIMIT = 8;
@@ -113,6 +120,8 @@
   let persistentStorageAvailable = true;
   let calculationInFlight = false;
   let lastDecisionSnapshot = null;
+  let retainedCandidate = null;
+  let retainedCandidateDestination = '';
   const autoMonitor = {
     active: false,
     watchId: null,
@@ -425,16 +434,16 @@
     const dueByDistance = moved >= policy.distanceM && elapsed >= AUTO_MIN_INTERVAL_MS;
     if (!dueByTime && !dueByDistance) return;
 
-    const snapshot = await calculate({ source: 'auto', suppressScroll: true, trigger });
-    if (snapshot && snapshot.mode !== 'error' && snapshot.mode !== 'incomplete') {
-      autoMonitor.lastCalcAt = Date.now();
-      autoMonitor.lastCalcPosition = { lat: currentPosition.lat, lng: currentPosition.lng };
-    }
+    // Record the attempt before calling external APIs.  A failed/incomplete
+    // calculation must not cause the 10-second monitor loop to hammer the APIs.
+    autoMonitor.lastCalcAt = nowMs;
+    autoMonitor.lastCalcPosition = { lat: currentPosition.lat, lng: currentPosition.lng };
+    await calculate({ source: 'auto', suppressScroll: true, trigger });
     updateAutoUi();
   }
 
   function currentAutoPolicy() {
-    let urgent = false;
+    let remaining = Infinity;
     if (lastDecisionSnapshot?.mode === 'candidate') {
       const switchRemaining = lastDecisionSnapshot.candidate?.switchDeadline
         ? lastDecisionSnapshot.candidate.switchDeadline.getTime() - Date.now()
@@ -442,13 +451,18 @@
       const navRemaining = lastDecisionSnapshot.candidate?.navGuidance?.changeBy instanceof Date
         ? lastDecisionSnapshot.candidate.navGuidance.changeBy.getTime() - Date.now()
         : Infinity;
-      urgent = Math.min(switchRemaining, navRemaining) <= AUTO_URGENT_THRESHOLD_MS;
+      remaining = Math.min(switchRemaining, navRemaining);
     } else if (lastDecisionSnapshot?.mode === 'no_toll' && Number.isFinite(lastDecisionSnapshot.localSlackMs)) {
-      urgent = lastDecisionSnapshot.localSlackMs <= AUTO_URGENT_THRESHOLD_MS;
+      remaining = lastDecisionSnapshot.localSlackMs;
     }
-    return urgent
-      ? { urgent: true, intervalMs: AUTO_URGENT_INTERVAL_MS, distanceM: AUTO_URGENT_DISTANCE_M }
-      : { urgent: false, intervalMs: AUTO_NORMAL_INTERVAL_MS, distanceM: AUTO_NORMAL_DISTANCE_M };
+
+    if (remaining <= AUTO_CRITICAL_THRESHOLD_MS) {
+      return { level: 'critical', intervalMs: AUTO_CRITICAL_INTERVAL_MS, distanceM: AUTO_CRITICAL_DISTANCE_M };
+    }
+    if (remaining <= AUTO_APPROACH_THRESHOLD_MS) {
+      return { level: 'approach', intervalMs: AUTO_APPROACH_INTERVAL_MS, distanceM: AUTO_APPROACH_DISTANCE_M };
+    }
+    return { level: 'normal', intervalMs: AUTO_NORMAL_INTERVAL_MS, distanceM: AUTO_NORMAL_DISTANCE_M };
   }
 
   function updateAutoUi(message = '') {
@@ -457,14 +471,14 @@
     els.autoStop.disabled = !autoMonitor.active;
     if (!autoMonitor.active) {
       els.autoStatus.textContent = message || '停止中';
-      els.monitorDetail.textContent = '開始するとGPSを継続取得し、通常は3分または5km移動ごと、切替期限が近いときは1分または1.5km移動ごとに再計算します。';
+      els.monitorDetail.textContent = '開始するとGPSを継続取得します。通常は5分または5km、判断時刻が近づくと3分、直前だけ1分を目安に再計算します。';
       return;
     }
 
     const policy = currentAutoPolicy();
     const elapsed = autoMonitor.lastCalcAt ? Date.now() - autoMonitor.lastCalcAt : 0;
     const remainMs = Math.max(0, policy.intervalMs - elapsed);
-    const mode = policy.urgent ? '期限接近モード' : '通常モード';
+    const mode = policy.level === 'critical' ? '切替直前' : policy.level === 'approach' ? '切替接近' : '通常';
     els.autoStatus.textContent = message || `監視中・${mode}`;
     els.monitorDetail.textContent = autoMonitor.lastCalcAt
       ? `次の時間再計算まで約${Math.max(0, Math.ceil(remainMs / 60_000))}分。推奨候補の変更や、ナビ変更の目安が近づいたときに音声通知します。`
@@ -474,6 +488,10 @@
   function finalizeCalculationSnapshot(snapshot, source) {
     if (!snapshot) return;
     if (source === 'auto') maybeNotifyDecisionChange(lastDecisionSnapshot, snapshot);
+    if (snapshot.mode === 'candidate' && snapshot.candidate?.waypoint) {
+      retainedCandidate = snapshot.candidate;
+      retainedCandidateDestination = els.destination.value.trim();
+    }
     lastDecisionSnapshot = snapshot;
   }
 
@@ -713,7 +731,7 @@
 
       const normalRequest = applyFutureDepartureTime({
         ...baseRequest,
-        fields: ['durationMillis', 'distanceMeters', 'localizedValues', 'travelAdvisory', 'legs'],
+        fields: ['durationMillis', 'distanceMeters', 'localizedValues', 'travelAdvisory', 'legs', 'path'],
         extraComputations: ['TOLLS'],
         routeModifiers: {
           vehicleInfo: { emissionType: 'GASOLINE' },
@@ -808,6 +826,7 @@
             now,
             practicalDeadline,
             localRoute,
+            normalRoute,
             localDirectDurationMs,
             normalDirectDurationMs,
             navitimeApiKey,
@@ -836,7 +855,7 @@
           : Infinity;
         const shouldRecomputeGuidance = source !== 'auto'
           || !previousGuidance
-          || (previousRemainingMs <= AUTO_URGENT_THRESHOLD_MS && previousAgeMs >= NAV_GUIDANCE_RECALC_MS);
+          || (previousRemainingMs <= AUTO_APPROACH_THRESHOLD_MS && previousAgeMs >= NAV_GUIDANCE_RECALC_MS);
         try {
           if (shouldRecomputeGuidance) {
             selected = await enrichNavigationGuidance({
@@ -898,6 +917,7 @@
     now,
     practicalDeadline,
     localRoute,
+    normalRoute,
     localDirectDurationMs,
     normalDirectDurationMs,
     navitimeApiKey,
@@ -912,7 +932,7 @@
     const routeTotalMeters = cumulative.at(-1) || Number(localRoute.distanceMeters || 0);
     if (!routeTotalMeters) throw new Error('下道ルートの距離を取得できませんでした。');
 
-    // v0.4.6: locate the deadline boundary with *time-correct* synthetic
+    // v0.6.3: locate the deadline boundary with *time-correct* synthetic
     // checkpoints first.  Each checkpoint uses the predicted arrival time at
     // that checkpoint as the departureTime of the fast leg.  This fixes the
     // main v0.4.5 error where the second leg was approximated at "now".
@@ -947,10 +967,10 @@
     });
 
     if (!discovered.length) {
-      els.candidateCount.textContent = `境界${checkpointResult.evaluated.length}点 / IC 0件`;
-      els.candidateStatus.textContent = '期限境界周辺で利用可能な高速入口を取得できませんでした。';
-      renderCandidateList([], null, now);
-      return { selected: null, reason: 'no_interchanges' };
+      return recoverCandidatesViaRecommendedRoute({
+        Route, RouteMatrix, origin, destination, now, practicalDeadline, localDirectDurationMs,
+        normalRoute, navitimeApiKey, startedAt, reason: 'no_interchanges',
+      });
     }
 
     // Only ICs reasonably close to the local-road corridor are useful.  NAVITIME
@@ -968,9 +988,10 @@
         || (a.corridorDistanceMeters - b.corridorDistanceMeters));
 
     if (!projected.length) {
-      els.candidateCount.textContent = `境界${checkpointResult.evaluated.length}点 / IC 0件`;
-      els.candidateStatus.textContent = '期限境界周辺のICは取得できましたが、下道ルートから現実的に利用できる入口を残せませんでした。';
-      return { selected: null, reason: 'no_projected_interchanges' };
+      return recoverCandidatesViaRecommendedRoute({
+        Route, RouteMatrix, origin, destination, now, practicalDeadline, localDirectDurationMs,
+        normalRoute, navitimeApiKey, startedAt, reason: 'no_projected_interchanges',
+      });
     }
 
     els.candidateCount.textContent = `境界${checkpointResult.evaluated.length}点 / IC${projected.length}件`;
@@ -981,8 +1002,10 @@
       .sort((a, b) => a.routeProgressMeters - b.routeProgressMeters);
 
     if (!localCandidates.length) {
-      els.candidateStatus.textContent = '候補ICまでの下道経路を取得できませんでした。';
-      return { selected: null, reason: 'no_local_candidates' };
+      return recoverCandidatesViaRecommendedRoute({
+        Route, RouteMatrix, origin, destination, now, practicalDeadline, localDirectDurationMs,
+        normalRoute, navitimeApiKey, startedAt, reason: 'no_local_candidates',
+      });
     }
 
     // Actual ICs are then searched adaptively.  A handful of exact anchor ICs
@@ -999,9 +1022,10 @@
     });
 
     if (!actualBoundary.boundary) {
-      renderCandidateList(actualBoundary.evaluated.filter((x) => x && !x.failed), null, now);
-      els.candidateStatus.textContent = '実在ICを精査しましたが、安全マージン込みの到着期限を満たす高速切替案が見つかりませんでした。';
-      return { selected: null, reason: 'no_safe_candidate' };
+      return recoverCandidatesViaRecommendedRoute({
+        Route, RouteMatrix, origin, destination, now, practicalDeadline, localDirectDurationMs,
+        normalRoute, navitimeApiKey, startedAt, reason: 'no_safe_candidate',
+      });
     }
 
     const ordered = localCandidates;
@@ -1043,9 +1067,10 @@
       .sort((a, b) => b.routeProgressMeters - a.routeProgressMeters);
 
     if (!fareCandidates.length) {
-      renderCandidateList(exactDisplay, actualBoundary.boundary.id, now);
-      els.candidateStatus.textContent = '期限境界は見つかりましたが、料金比較対象となる安全なICを確定できませんでした。';
-      return { selected: null, reason: 'no_fare_candidate' };
+      return recoverCandidatesViaRecommendedRoute({
+        Route, RouteMatrix, origin, destination, now, practicalDeadline, localDirectDurationMs,
+        normalRoute, navitimeApiKey, startedAt, reason: 'no_fare_candidate',
+      });
     }
 
     els.candidateCount.textContent = `境界${checkpointResult.evaluated.length}点 / IC${projected.length}件 / 正確${exactDisplay.length}件 / 料金${fareCandidates.length}件`;
@@ -1120,6 +1145,161 @@
     }
 
     return { selected, display, pricedSafe, elapsedSec };
+  }
+
+  async function recoverCandidatesViaRecommendedRoute({
+    Route,
+    RouteMatrix,
+    origin,
+    destination,
+    now,
+    practicalDeadline,
+    localDirectDurationMs,
+    normalRoute,
+    navitimeApiKey,
+    startedAt,
+    reason,
+  }) {
+    // The local-road corridor can miss a perfectly usable entrance when the
+    // fastest route first moves sideways (or slightly backwards) to reach an
+    // expressway.  When that happens, use Google's known-safe recommended route
+    // as a second discovery axis instead of concluding that no safe IC exists.
+    const normalPath = normalizeRoutePath(normalRoute?.path);
+    const remembered = retainedCandidateDestination === destination && retainedCandidate?.waypoint
+      ? [{
+        id: retainedCandidate.id || `remembered-${retainedCandidate.navitimeIcId || retainedCandidate.name}`,
+        navitimeIcId: retainedCandidate.navitimeIcId || null,
+        name: retainedCandidate.name,
+        road: retainedCandidate.road || '前回の推奨入口',
+        waypoint: retainedCandidate.waypoint,
+        source: 'RETAINED',
+      }]
+      : [];
+
+    if (normalPath.length < 2 && !remembered.length) {
+      renderCandidateList([], null, now, practicalDeadline);
+      els.candidateStatus.textContent = 'Google推奨ルートなら期限内ですが、高速入口を特定できませんでした。';
+      return { selected: null, reason: `recovery_unavailable:${reason}` };
+    }
+
+    const discovered = [];
+    if (normalPath.length >= 2) {
+      const cumulative = cumulativePathDistances(normalPath);
+      const total = cumulative.at(-1) || 0;
+      const horizon = Math.min(total, RECOVERY_ROUTE_HORIZON_M);
+      const progresses = [];
+      for (let p = 0; p <= horizon + 1; p += RECOVERY_IC_SAMPLE_STEP_M) progresses.push(p);
+      if (!progresses.length || Math.abs(progresses.at(-1) - horizon) > 3_000) progresses.push(horizon);
+      const centers = progresses
+        .map((progress) => interpolatePathAtDistance(normalPath, cumulative, progress))
+        .filter(Boolean);
+      const groups = await mapWithConcurrency(centers, NAVITIME_IC_SEARCH_CONCURRENCY, (coord) => (
+        fetchNavitimeIcSearch({ apiKey: navitimeApiKey, coord, radiusMeters: NAVITIME_IC_SEARCH_RADIUS_M })
+      ));
+      groups.forEach((group) => discovered.push(...group));
+    }
+
+    let pool = dedupeCandidates([...remembered, ...discovered]);
+    if (!pool.length) {
+      renderCandidateList([], null, now, practicalDeadline);
+      els.candidateStatus.textContent = 'Google推奨ルートなら期限内ですが、高速入口を取得できませんでした。';
+      return { selected: null, reason: `recovery_no_ic:${reason}` };
+    }
+
+    // Project to the recommended route only for representative selection.  The
+    // final feasibility check always uses an actual local-road route to the IC.
+    if (normalPath.length >= 2) {
+      pool = pool.map((candidate) => ({ ...candidate, ...projectPointToRoute(candidate.waypoint, normalPath) }));
+    }
+    const withLocal = (await attachLocalMatrixChunked(RouteMatrix, origin, pool, now))
+      .filter((candidate) => candidate.exists && Number.isFinite(candidate.localDurationMs));
+    if (!withLocal.length) {
+      renderCandidateList([], null, now, practicalDeadline);
+      els.candidateStatus.textContent = 'Google推奨ルートなら期限内ですが、入口までの下道経路を取得できませんでした。';
+      return { selected: null, reason: `recovery_no_local:${reason}` };
+    }
+
+    const rememberedIds = new Set(remembered.map((x) => x.id));
+    const ordered = withLocal.slice().sort((a, b) => a.localDurationMs - b.localDurationMs);
+    const representatives = [];
+    // Always re-check the previous recommendation if it still exists.
+    for (const item of ordered) {
+      if (rememberedIds.has(item.id)) representatives.push(item);
+    }
+    // Keep several nearby entries plus evenly-spaced entries farther along the
+    // recommended route so a dense urban IC cluster cannot consume the budget.
+    representatives.push(...ordered.slice(0, 8));
+    representatives.push(...selectProgressRepresentatives(
+      ordered.filter((x) => Number.isFinite(x.routeProgressMeters)),
+      Math.max(0, RECOVERY_EXACT_LIMIT - 8),
+      1,
+    ));
+    const exactPool = dedupeCandidates(representatives).slice(0, RECOVERY_EXACT_LIMIT);
+    const exact = await mapWithConcurrency(exactPool, CANDIDATE_CONCURRENCY, (candidate) => (
+      evaluateCandidateTiming({ Route, candidate, destination, now, practicalDeadline, localDirectDurationMs })
+    ));
+    const safe = exact.filter((item) => item && !item.failed && item.safe);
+
+    if (!safe.length) {
+      // Important invariant: the Google recommended route is known to meet the
+      // deadline before this function is called.  Showing a list of only unsafe
+      // ICs would falsely imply that no feasible route exists, so keep the UI
+      // honest and retry on the next scheduled refresh instead.
+      renderCandidateList([], null, now, practicalDeadline);
+      els.candidateStatus.textContent = 'Google推奨ルートなら期限内です。高速入口の特定だけ再確認が必要です。';
+      return { selected: null, reason: `recovery_no_safe:${reason}` };
+    }
+
+    const latest = safe.slice().sort((a, b) => b.localDurationMs - a.localDurationMs);
+    const farePool = dedupeCandidates([
+      ...latest.slice(0, RECOVERY_FARE_LIMIT),
+      ...selectProgressRepresentatives(safe, Math.min(2, safe.length), 1),
+    ]).slice(0, RECOVERY_FARE_LIMIT + 2);
+
+    const priced = await mapWithConcurrency(farePool, NAVITIME_CONCURRENCY, async (candidate) => {
+      if (!candidate.endpoints?.goal) return candidate;
+      try {
+        const navFare = await fetchNavitimeEtcFare({
+          apiKey: navitimeApiKey,
+          start: candidate.endpoints?.start || candidate.waypoint,
+          startIcId: candidate.navitimeIcId || null,
+          goal: candidate.endpoints.goal,
+          departureTime: candidate.icArrival,
+          startName: candidate.name,
+          forceTollStart: !candidate.navitimeIcId,
+        });
+        return { ...candidate, toll: navFare, navitimeFareError: null };
+      } catch (error) {
+        console.warn('NAVITIME recovery fare failed:', candidate.name, error);
+        return { ...candidate, navitimeFareError: shortError(error) };
+      }
+    });
+
+    const pricedSafe = priced.filter((item) => item.safe && Number.isFinite(item.toll?.yen) && item.toll?.source === 'NAVITIME');
+    let selected = pricedSafe.slice().sort((a, b) => (a.toll.yen - b.toll.yen)
+      || (b.localDurationMs - a.localDurationMs))[0] || null;
+    if (!selected) selected = latest[0] || null;
+    if (selected) selected = await refineSwitchDeadline(Route, selected, destination, practicalDeadline, now);
+
+    const displayMap = new Map(exact.filter((x) => x && !x.failed).map((x) => [x.id, x]));
+    priced.forEach((x) => displayMap.set(x.id, x));
+    if (selected) displayMap.set(selected.id, selected);
+    const display = [...displayMap.values()].sort((a, b) => {
+      const ap = Number.isFinite(a.toll?.yen) && a.toll?.source === 'NAVITIME';
+      const bp = Number.isFinite(b.toll?.yen) && b.toll?.source === 'NAVITIME';
+      if (ap && bp) return (a.toll.yen - b.toll.yen) || (b.localDurationMs - a.localDurationMs);
+      if (ap !== bp) return ap ? -1 : 1;
+      if (a.safe !== b.safe) return a.safe ? -1 : 1;
+      return b.localDurationMs - a.localDurationMs;
+    });
+
+    renderCandidateList(display, selected?.id || null, now, practicalDeadline);
+    renderSwitchSummary(selected, now, practicalDeadline);
+    const elapsedSec = (performance.now() - startedAt) / 1000;
+    els.candidateStatus.textContent = selected
+      ? `推奨ルート側も含めて入口候補を再確認しました。探索 ${elapsedSec.toFixed(1)}秒。`
+      : '高速入口を再確認中です。';
+    return { selected, display, pricedSafe, elapsedSec, recovered: true };
   }
 
   async function evaluateSyntheticCheckpointBoundary({
@@ -1369,7 +1549,7 @@
   }
 
   async function fetchNavitimeIcSearch({ apiKey, coord, radiusMeters = 10_000 }) {
-    const cacheKey = `${coord.lat.toFixed(3)},${coord.lng.toFixed(3)}:${Math.round(radiusMeters)}`;
+    const cacheKey = `${coord.lat.toFixed(2)},${coord.lng.toFixed(2)}:${Math.round(radiusMeters)}`;
     if (NAVITIME_IC_CACHE.has(cacheKey)) return NAVITIME_IC_CACHE.get(cacheKey);
 
     const params = new URLSearchParams();
