@@ -9,8 +9,8 @@
   const STORAGE_KEY_NATIONAL_IC_LEGACY = 'deadlineNavi.nationalIcV071';
   const STORAGE_KEY_NATIONAL_IC_META_LEGACY = 'deadlineNavi.nationalIcMetaV071';
   const STORAGE_KEY_API_USAGE = 'deadlineNavi.apiUsageV071';
-  const CURRENT_APP_VERSION = '0.7.3';
-  const LOCAL_IC_DATA_URL = './ic-data.min.json?v=073';
+  const CURRENT_APP_VERSION = '0.7.4';
+  const LOCAL_IC_DATA_URL = './ic-data.min.json?v=074';
   const LOCAL_IC_MIN_COMPLETE_COUNT = 300;
   const IC_DISCOVERY_NETWORK_DISABLED = true;
   const NATIONAL_IC_PREFILTER_LIMIT = 12;
@@ -172,6 +172,7 @@
   let apiUsageSession = createEmptyApiUsage();
   let apiUsageCurrent = createEmptyApiUsage();
   let candidateDiagCurrent = createEmptyCandidateDiagnostic();
+  let evaluatedCandidateKeysCurrent = new Set();
   const autoMonitor = {
     active: false,
     watchId: null,
@@ -924,7 +925,7 @@
       const s = candidateDiagCurrent[phase];
       if (!s) continue;
       any = true;
-      rows.push(`  ${labels[phase]}: 発見 ${s.discovered} → Matrix送信 ${s.sent} → 概算safe ${s.approxSafe} → 精査safe ${s.safe}`);
+      rows.push(`  ${labels[phase]}: 発見 ${s.discovered} → 評価済除外 ${s.reused || 0} → Matrix新規 ${s.sent} → 概算safe ${s.approxSafe} → 精査safe ${s.safe}`);
     }
     if (!any) rows.push('  まだ候補評価を実行していません');
     return rows.join('\n');
@@ -964,6 +965,7 @@
   function beginApiUsageCalculation() {
     apiUsageCurrent = createEmptyApiUsage();
     candidateDiagCurrent = createEmptyCandidateDiagnostic();
+    evaluatedCandidateKeysCurrent = new Set();
     renderApiUsageDiagnostic();
   }
 
@@ -1483,10 +1485,7 @@
         destination,
         recovery: true,
       });
-      pool = prefilterDiscoveredCandidatesV071(
-        dedupeIcCandidatesV070([...pool, ...recoveryPool]),
-        NATIONAL_IC_RECOVERY_LIMIT,
-      );
+      pool = dedupeIcCandidatesV070([...pool, ...recoveryPool]);
       evaluated = await evaluateCandidatePoolV070({
         Route,
         RouteMatrix,
@@ -1508,10 +1507,7 @@
         ...builtinCandidatesForRouteV070(normalPath),
       ]);
       if (builtinFallback.length) {
-        pool = prefilterDiscoveredCandidatesV071(
-          dedupeIcCandidatesV070([...pool, ...builtinFallback]),
-          V073_BUILTIN_FALLBACK_LIMIT,
-        );
+        pool = dedupeIcCandidatesV070([...pool, ...builtinFallback]);
         evaluated = await evaluateCandidatePoolV070({
           Route,
           RouteMatrix,
@@ -1812,6 +1808,36 @@
     return [...byName.values()];
   }
 
+  function candidateEvaluationKeyV074(candidate) {
+    const nameKey = normalizeIcKey(candidate?.name || '');
+    return nameKey || String(candidate?.id || '');
+  }
+
+  function selectUnevaluatedCandidatesV074(candidates, limit) {
+    const unique = dedupeIcCandidatesV070(candidates);
+    const unseen = [];
+    let reused = 0;
+    for (const candidate of unique) {
+      const key = candidateEvaluationKeyV074(candidate);
+      if (key && evaluatedCandidateKeysCurrent.has(key)) {
+        reused += 1;
+        continue;
+      }
+      unseen.push(candidate);
+    }
+    const selected = prefilterDiscoveredCandidatesV071(unseen, limit);
+    for (const candidate of selected) {
+      const key = candidateEvaluationKeyV074(candidate);
+      if (key) evaluatedCandidateKeysCurrent.add(key);
+    }
+    return {
+      selected,
+      discovered: unique.length,
+      reused,
+      eligible: unseen.length,
+    };
+  }
+
   async function evaluateCandidatePoolV070({
     Route,
     RouteMatrix,
@@ -1824,18 +1850,20 @@
     candidates,
     matrixCandidateLimit = NATIONAL_IC_PREFILTER_LIMIT,
   }) {
-    const discoveredCount = candidates.length;
-    const matrixCandidates = prefilterDiscoveredCandidatesV071(candidates, matrixCandidateLimit);
-    if (!matrixCandidates.length) return { exact: [], safe: [], stats: { discovered: discoveredCount, sent: 0, approxSafe: 0, safe: 0 } };
+    const selection = selectUnevaluatedCandidatesV074(candidates, matrixCandidateLimit);
+    const discoveredCount = selection.discovered;
+    const reusedCount = selection.reused;
+    const matrixCandidates = selection.selected;
+    if (!matrixCandidates.length) return { exact: [], safe: [], stats: { discovered: discoveredCount, reused: reusedCount, sent: 0, approxSafe: 0, safe: 0 } };
     let local = (await attachLocalMatrixChunked(RouteMatrix, origin, matrixCandidates, now))
       .filter((candidate) => candidate.exists && Number.isFinite(candidate.localDurationMs) && candidate.localDurationMs > 0)
       .filter((candidate) => candidate.localDurationMs <= Math.max(localDirectDurationMs * 1.12, normalDirectDurationMs + 3 * 60 * 60_000));
-    if (!local.length) return { exact: [], safe: [], stats: { discovered: discoveredCount, sent: matrixCandidates.length, approxSafe: 0, safe: 0 } };
+    if (!local.length) return { exact: [], safe: [], stats: { discovered: discoveredCount, reused: reusedCount, sent: matrixCandidates.length, approxSafe: 0, safe: 0 } };
 
     const fastApprox = await attachFastMatrixApproxChunkedV070(RouteMatrix, local, destination, now);
     const combined = combineApproximateMatrixResults(local, fastApprox, now, practicalDeadline)
       .filter((item) => item.fastApproxExists && item.approxTotalDurationMs > 0);
-    if (!combined.length) return { exact: [], safe: [], stats: { discovered: discoveredCount, sent: matrixCandidates.length, approxSafe: 0, safe: 0 } };
+    if (!combined.length) return { exact: [], safe: [], stats: { discovered: discoveredCount, reused: reusedCount, sent: matrixCandidates.length, approxSafe: 0, safe: 0 } };
 
     const byDeadline = combined.slice().sort((a, b) => {
       const ag = Math.abs(practicalDeadline.getTime() - a.approxEta.getTime());
@@ -1885,6 +1913,7 @@
       safe: dedupeCandidates(safe),
       stats: {
         discovered: discoveredCount,
+        reused: reusedCount,
         sent: matrixCandidates.length,
         approxSafe: combined.filter((item) => item.approxSafe).length,
         safe: dedupeCandidates(safe).length,

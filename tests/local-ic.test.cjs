@@ -14,7 +14,7 @@ function app(payload = catalog, legacy = []) {
     fetch: async url => {calls.push(url); assert.match(url, /^\.\/ic-data\.min\.json\?/); if (payload instanceof Error) throw payload; return {ok:true, json:async()=>payload};},
     legacy,
   };
-  const source = original.replace('  init();', '  nationalIcCatalog = legacy;').replace(/\}\)\(\);\s*$/, `globalThis.api = {ensureNationalIcCatalogV072, discoverCandidatePoolV070, fetchOsmIcCellV070, discoverInterchangesAlongRoute, fetchNavitimeIcSearch, getMeta:()=>nationalIcMeta, usage:()=>apiUsageCurrent, prefilterDiscoveredCandidatesV071};})();`);
+  const source = original.replace('  init();', '  nationalIcCatalog = legacy;').replace(/\}\)\(\);\s*$/, `globalThis.api = {ensureNationalIcCatalogV072, discoverCandidatePoolV070, fetchOsmIcCellV070, discoverInterchangesAlongRoute, fetchNavitimeIcSearch, getMeta:()=>nationalIcMeta, usage:()=>apiUsageCurrent, prefilterDiscoveredCandidatesV071, beginApiUsageCalculation, selectUnevaluatedCandidatesV074};})();`);
   vm.runInNewContext(source, context);
   return {...context.api, calls, elements};
 }
@@ -86,10 +86,49 @@ test('v0.7.3 matrix prefilter keeps requested hard limits', () => {
   assert.equal(a.prefilterDiscoveredCandidatesV071(make(40), 8).length, 8);
 });
 
-test('v0.7.3 budget constants and version are present', () => {
-  assert.match(original, /CURRENT_APP_VERSION = '0\.7\.3'/);
+test('v0.7.4 budget constants and version are present', () => {
+  assert.match(original, /CURRENT_APP_VERSION = '0\.7\.4'/);
   assert.match(original, /NATIONAL_IC_PREFILTER_LIMIT = 12/);
   assert.match(original, /NATIONAL_IC_RECOVERY_LIMIT = 18/);
   assert.match(original, /V073_BUILTIN_FALLBACK_LIMIT = 8/);
   assert.match(original, /V073_MATRIX_ELEMENT_BUDGET = 99/);
+});
+
+
+test('v0.7.4 excludes candidates already sent earlier in the same calculation', () => {
+  const a = app();
+  a.beginApiUsageCalculation();
+  const make = (start, count) => Array.from({length:count}, (_,i) => ({
+    id: 'n'+(start+i),
+    name: '候補'+(start+i)+'IC',
+    source: 'NATIONAL',
+    corridorDistanceMeters: (start+i) * 1000,
+    localRankScore: (start+i) * 1000,
+  }));
+
+  const initial = a.selectUnevaluatedCandidatesV074(make(0, 20), 12);
+  assert.equal(initial.discovered, 20);
+  assert.equal(initial.reused, 0);
+  assert.equal(initial.selected.length, 12);
+
+  const recovery = a.selectUnevaluatedCandidatesV074([...make(0, 12), ...make(20, 18)], 18);
+  assert.equal(recovery.discovered, 30);
+  assert.equal(recovery.reused, 12);
+  assert.equal(recovery.selected.length, 18);
+  assert.ok(recovery.selected.every(x => Number(x.id.slice(1)) >= 20));
+
+  const fallback = a.selectUnevaluatedCandidatesV074([...make(0, 12), ...make(20, 18), ...make(50, 8)], 8);
+  assert.equal(fallback.reused, 30);
+  assert.equal(fallback.selected.length, 8);
+  assert.ok(fallback.selected.every(x => Number(x.id.slice(1)) >= 50));
+});
+
+test('v0.7.4 evaluation set resets for a new calculation', () => {
+  const a = app();
+  const candidate = [{id:'x',name:'京都南IC',source:'NATIONAL',corridorDistanceMeters:0,localRankScore:0}];
+  a.beginApiUsageCalculation();
+  assert.equal(a.selectUnevaluatedCandidatesV074(candidate, 12).selected.length, 1);
+  assert.equal(a.selectUnevaluatedCandidatesV074(candidate, 12).selected.length, 0);
+  a.beginApiUsageCalculation();
+  assert.equal(a.selectUnevaluatedCandidatesV074(candidate, 12).selected.length, 1);
 });
