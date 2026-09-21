@@ -49,13 +49,29 @@ jobs:
           for name in required:
               key=m.normalize_name(name)
               assert key in g['junctionIndex'] and g['junctionIndex'][key], (name,key)
-          start=g['junctionIndex'][m.normalize_name('久御山南IC')]
-          goal=g['junctionIndex'][m.normalize_name('枚方東IC')]
-          d,path=m.shortest_distance(g,start,goal)
-          assert d is not None and 5 < d < 30, d
-          print('久御山南IC -> 枚方東IC shortest graph distance km:',round(d,3))
+          d,path=m.shortest_distance_between_junctions(g,'久御山南IC','枚方東IC')
+          assert d is not None and 4.5 < d < 9.0, d
+          print('久御山南IC -> 枚方東IC access-aware graph distance km:',round(d,3))
           print('roads:',sorted({e.get('road') for e in path if e.get('road')}))
           print(json.dumps(g['meta'],ensure_ascii=False,indent=2))
+          PY
+      - name: Verify v0.8.2 Kansai tariff pilot
+        run: |
+          node --test tests/toll-tariff-rules.test.cjs
+          python3 - <<'PY'
+          import json,importlib.util,subprocess
+          spec=importlib.util.spec_from_file_location('m','tools/build-osm-toll-graph.py')
+          m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+          g=json.load(open('/tmp/toll-road-graph-kansai.min.json',encoding='utf-8'))
+          d,path=m.shortest_distance_between_junctions(g,'久御山南IC','枚方東IC')
+          roads=sorted({e.get('road') for e in path if e.get('road')})
+          payload=json.dumps({'distanceKm':d,'roads':roads},ensure_ascii=False)
+          r=subprocess.run(['node','tools/quote-kansai-pilot.cjs',payload],capture_output=True,text=True,check=True)
+          print(r.stdout)
+          q=json.loads(r.stdout)
+          assert q['quality']=='estimate',q
+          assert q['source']=='local-formula',q
+          assert 430 <= q['yen'] <= 550,q
           PY
       - uses: actions/upload-artifact@v4
         with:
