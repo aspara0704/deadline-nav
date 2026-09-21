@@ -116,6 +116,19 @@ jobs:
                       shown+=1
                       if shown>=120:break
           print('bbox joint count shown',shown)
+          print('\nLATEST JOINTS SOUTH KYOTO / NORTH OSAKA SORTED')
+          focus=[]
+          for f in joints.get('features',[]):
+              co=(f.get('geometry') or {}).get('coordinates')
+              if isinstance(co,list) and len(co)>=2 and all(isinstance(v,(int,float)) for v in co[:2]):
+                  lng,lat=float(co[0]),float(co[1])
+                  if 135.62 <= lng <= 135.83 and 34.72 <= lat <= 34.96:
+                      p=f.get('properties') or {}
+                      if str(p.get('N06_014'))=='9999':
+                          focus.append((lat,lng,p))
+          for lat,lng,p in sorted(focus,reverse=True):
+              print(f"{lat:.6f} {lng:.6f}",p)
+          print('focus active joint count',len(focus))
 
           sections=json.load(open('/tmp/n06latest/N06-25_GML/UTF-8/N06-25_HighwaySection.geojson',encoding='utf-8-sig'))
           print('\nLATEST SECTION PROPERTY SAMPLE')
