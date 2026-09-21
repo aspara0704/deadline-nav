@@ -6,6 +6,7 @@
   const STORAGE_KEY_FORM = 'deadlineNavi.formV05';
   const STORAGE_KEY_IC_CATALOG = 'deadlineNavi.icCatalogV070';
   const STORAGE_KEY_NAVITIME_BLOCK = 'deadlineNavi.navitimeBlockV070';
+  const STORAGE_KEY_API_USAGE = 'deadlineNavi.apiUsageV071';
   const AUTO_NORMAL_INTERVAL_MS = 5 * 60_000;
   const AUTO_APPROACH_INTERVAL_MS = 3 * 60_000;
   const AUTO_CRITICAL_INTERVAL_MS = 60_000;
@@ -132,6 +133,8 @@
     voiceSelect: $('voiceSelect'),
     voiceStatus: $('voiceStatus'),
     monitorDetail: $('monitorDetail'),
+    apiUsageDetail: $('apiUsageDetail'),
+    apiUsageReset: $('apiUsageReset'),
   };
 
   let currentPosition = null;
@@ -157,6 +160,11 @@
     speechPrimed: false,
   };
 
+  let apiUsageLifetime = loadApiUsageLifetime();
+  let apiUsageSession = emptyApiUsageCounters();
+  let apiUsageCurrentCycle = null;
+  let apiUsageLastCycle = null;
+
   init();
 
   function init() {
@@ -168,6 +176,7 @@
 
     els.saveApiKey.addEventListener('click', saveApiKey);
     els.googleDiag?.addEventListener('click', diagnoseGoogleApi);
+    els.apiUsageReset?.addEventListener('click', resetApiUsageCounters);
     els.saveNavitimeApiKey.addEventListener('click', saveNavitimeApiKey);
     els.getLocation.addEventListener('click', requestLocation);
     els.useDebugNow.addEventListener('change', () => { updateDebugControls(); persistFormState(); });
@@ -191,6 +200,7 @@
     });
     updateDebugControls();
     updateAutoUi();
+    refreshApiUsageUi();
   }
 
   function restoreState() {
@@ -890,6 +900,7 @@
     if (Number.isNaN(deadline.getTime())) { calculationInFlight = false; showError('到着希望日時を入力してください。'); return null; }
     if (deadline <= now) { calculationInFlight = false; showError('到着希望日時は、計算に使う現在時刻より後に設定してください。'); return null; }
 
+    beginApiUsageCycle(source);
     setBusy(true);
     let snapshot = null;
 
@@ -919,8 +930,8 @@
       }, now);
 
       const [normalResult, localResult] = await Promise.all([
-        Route.computeRoutes(normalRequest),
-        Route.computeRoutes(localRequest),
+        trackedComputeRoutes(Route, normalRequest, 'direct_google_route'),
+        trackedComputeRoutes(Route, localRequest, 'direct_local_route'),
       ]);
 
       const normalRoute = normalResult.routes?.[0];
@@ -1064,6 +1075,7 @@
       finalizeCalculationSnapshot(snapshot, source);
       return snapshot;
     } finally {
+      endApiUsageCycle(snapshot?.mode || 'unknown');
       setBusy(false);
       calculationInFlight = false;
       if (autoMonitor.active) updateAutoUi();
@@ -1388,6 +1400,7 @@
       try {
         const controller = new AbortController();
         const timeout = window.setTimeout(() => controller.abort(), 13_000);
+        recordApiUsage('osmRequests', 1, 'overpass');
         const response = await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
@@ -2304,6 +2317,7 @@
 
     let response;
     try {
+      recordApiUsage('navitimeIcRequests', 1, 'navitime_ic');
       response = await fetch(`${NAVITIME_IC_URL}?${params.toString()}`, {
         method: 'GET',
         headers: {
@@ -2366,7 +2380,7 @@
       fields: ['condition', 'durationMillis', 'distanceMeters'],
     };
     applyFutureDepartureTime(request, departureTime);
-    const { matrix } = await RouteMatrix.computeRouteMatrix(request);
+    const { matrix } = await trackedComputeRouteMatrix(RouteMatrix, request, 'local_to_ic_matrix');
     const items = matrix?.rows?.[0]?.items || [];
     return candidates.map((candidate, index) => {
       const item = items[index];
@@ -2392,7 +2406,7 @@
       fields: ['durationMillis', 'distanceMeters'],
     };
     applyFutureDepartureTime(request, departureTime);
-    const { matrix } = await RouteMatrix.computeRouteMatrix(request);
+    const { matrix } = await trackedComputeRouteMatrix(RouteMatrix, request, 'ic_to_destination_matrix');
     const rows = matrix?.rows || [];
     return candidates.map((candidate, index) => {
       const item = rows[index]?.items?.[0];
@@ -2615,7 +2629,7 @@
       },
     };
     applyFutureDepartureTime(request, departureTime);
-    const result = await Route.computeRoutes(request);
+    const result = await trackedComputeRoutes(Route, request, 'local_leg_exact');
     return result.routes?.[0] || null;
   }
 
@@ -2814,6 +2828,7 @@
 
     for (const endpoint of OVERPASS_ENDPOINTS) {
       try {
+        recordApiUsage('osmRequests', 1, 'overpass');
         const response = await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
@@ -3047,7 +3062,7 @@
       request.departureTime = departureTime;
     }
 
-    const result = await Route.computeRoutes(request);
+    const result = await trackedComputeRoutes(Route, request, includeTolls ? 'fast_leg_tolls' : 'fast_leg_exact');
     return result.routes?.[0] || null;
   }
 
@@ -3191,6 +3206,121 @@
     return manual || null;
   }
 
+  function emptyApiUsageCounters() {
+    return {
+      googleRoutesProRequests: 0,
+      googleRoutesEnterpriseRequests: 0,
+      googleMatrixProElements: 0,
+      navitimeIcRequests: 0,
+      navitimeFareRequests: 0,
+      osmRequests: 0,
+    };
+  }
+
+  function loadApiUsageLifetime() {
+    try {
+      const parsed = JSON.parse(safeStorageGet(STORAGE_KEY_API_USAGE) || '{}');
+      return { ...emptyApiUsageCounters(), ...parsed };
+    } catch (_) {
+      return emptyApiUsageCounters();
+    }
+  }
+
+  function persistApiUsageLifetime() {
+    safeStorageSet(STORAGE_KEY_API_USAGE, JSON.stringify(apiUsageLifetime));
+  }
+
+  function addUsage(target, kind, amount) {
+    if (!target || !(kind in target)) return;
+    target[kind] = Number(target[kind] || 0) + Number(amount || 0);
+  }
+
+  function recordApiUsage(kind, amount = 1, label = '') {
+    addUsage(apiUsageSession, kind, amount);
+    addUsage(apiUsageLifetime, kind, amount);
+    if (apiUsageCurrentCycle) {
+      addUsage(apiUsageCurrentCycle.counters, kind, amount);
+      if (label) apiUsageCurrentCycle.events.push({ kind, amount, label });
+    }
+    persistApiUsageLifetime();
+    refreshApiUsageUi();
+  }
+
+  function beginApiUsageCycle(source) {
+    apiUsageCurrentCycle = {
+      source,
+      startedAt: new Date(),
+      counters: emptyApiUsageCounters(),
+      events: [],
+    };
+    refreshApiUsageUi();
+  }
+
+  function endApiUsageCycle(resultMode = 'unknown') {
+    if (!apiUsageCurrentCycle) return;
+    apiUsageLastCycle = {
+      ...apiUsageCurrentCycle,
+      resultMode,
+      endedAt: new Date(),
+    };
+    apiUsageCurrentCycle = null;
+    refreshApiUsageUi();
+  }
+
+  function resetApiUsageCounters() {
+    apiUsageLifetime = emptyApiUsageCounters();
+    apiUsageSession = emptyApiUsageCounters();
+    apiUsageCurrentCycle = null;
+    apiUsageLastCycle = null;
+    safeStorageRemove(STORAGE_KEY_API_USAGE);
+    refreshApiUsageUi();
+  }
+
+  function formatApiUsageCounters(c) {
+    const x = c || emptyApiUsageCounters();
+    return [
+      `Google Routes Pro: ${Number(x.googleRoutesProRequests || 0).toLocaleString('ja-JP')} request`,
+      `Google Routes Enterprise (TOLLS): ${Number(x.googleRoutesEnterpriseRequests || 0).toLocaleString('ja-JP')} request`,
+      `Google Route Matrix Pro: ${Number(x.googleMatrixProElements || 0).toLocaleString('ja-JP')} element`,
+      `NAVITIME IC検索: ${Number(x.navitimeIcRequests || 0).toLocaleString('ja-JP')} request`,
+      `NAVITIME 料金: ${Number(x.navitimeFareRequests || 0).toLocaleString('ja-JP')} request`,
+      `OpenStreetMap / Overpass: ${Number(x.osmRequests || 0).toLocaleString('ja-JP')} request`,
+    ];
+  }
+
+  function refreshApiUsageUi() {
+    if (!els.apiUsageDetail) return;
+    const lines = ['Deadline Navi API使用量（アプリ内計測）'];
+    if (apiUsageCurrentCycle) {
+      lines.push('', `計算中: ${apiUsageCurrentCycle.source}`);
+      lines.push(...formatApiUsageCounters(apiUsageCurrentCycle.counters).map((x) => `  ${x}`));
+    } else if (apiUsageLastCycle) {
+      lines.push('', `直近1計算: ${apiUsageLastCycle.source} / ${apiUsageLastCycle.resultMode}`);
+      lines.push(...formatApiUsageCounters(apiUsageLastCycle.counters).map((x) => `  ${x}`));
+    } else {
+      lines.push('', '直近1計算: まだありません');
+    }
+    lines.push('', 'このページを開いてから:');
+    lines.push(...formatApiUsageCounters(apiUsageSession).map((x) => `  ${x}`));
+    lines.push('', 'この端末の累計（v0.7.1以降）:');
+    lines.push(...formatApiUsageCounters(apiUsageLifetime).map((x) => `  ${x}`));
+    els.apiUsageDetail.textContent = lines.join('\n');
+  }
+
+  async function trackedComputeRoutes(Route, request, label = '') {
+    const enterprise = Array.isArray(request?.extraComputations) && request.extraComputations.includes('TOLLS');
+    recordApiUsage(enterprise ? 'googleRoutesEnterpriseRequests' : 'googleRoutesProRequests', 1, label);
+    return Route.computeRoutes(request);
+  }
+
+  async function trackedComputeRouteMatrix(RouteMatrix, request, label = '') {
+    const origins = Array.isArray(request?.origins) ? request.origins.length : 0;
+    const destinations = Array.isArray(request?.destinations) ? request.destinations.length : 0;
+    const elements = Math.max(0, origins * destinations);
+    recordApiUsage('googleMatrixProElements', elements, label);
+    return RouteMatrix.computeRouteMatrix(request);
+  }
+
   async function diagnoseGoogleApi() {
     const key = getApiKey();
     const box = els.googleDiagResult;
@@ -3235,13 +3365,13 @@
 
       lines.push('2) Route.computeRoutes 最小テスト…');
       box.textContent = lines.join('\n');
-      const test = await Route.computeRoutes({
+      const test = await trackedComputeRoutes(Route, {
         origin: { lat: 35.0116, lng: 135.7681 },
         destination: { lat: 35.0210, lng: 135.7720 },
         travelMode: 'DRIVING',
         routingPreference: 'TRAFFIC_AWARE',
         fields: ['durationMillis', 'distanceMeters'],
-      });
+      }, 'diagnostic_route');
       const route = test?.routes?.[0];
       if (!route) throw new Error('診断用ルートが返りませんでした。');
       lines.push(`   OK: ${Math.round(Number(route.distanceMeters || 0))}m / ${Math.round(Number(route.durationMillis || 0) / 1000)}秒`);
@@ -3473,6 +3603,7 @@
 
     let response;
     try {
+      recordApiUsage('navitimeFareRequests', 1, 'navitime_fare');
       response = await fetch(`${NAVITIME_ROUTE_URL}?${params.toString()}`, {
         method: 'GET',
         headers: {
