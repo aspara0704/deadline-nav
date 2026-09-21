@@ -6,6 +6,7 @@ on:
       - 'tools/build-osm-toll-graph.py'
       - 'tests/osm-toll-graph.test.cjs'
       - 'toll-tariff-rules.js'
+      - 'TOLL-TARIFF-NOTICE.md'
       - 'tests/toll-tariff-rules.test.cjs'
       - 'tools/quote-kansai-pilot.cjs'
       - 'TOLL-GRAPH-NOTICE.md'
