@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aspara0704.github.io/deadline-nav/toll-quote.schema.json",
+  "title": "Deadline Navi local toll quote",
+  "type": "object",
+  "required": ["yen", "quality", "source", "basis", "warnings"],
+  "properties": {
+    "yen": {"type": ["integer", "null"], "minimum": 0},
+    "quality": {"enum": ["exact", "estimate", "unknown"]},
+    "source": {"enum": ["local-table", "local-formula", "google", "navitime", "unknown"]},
+    "basis": {"type": "string"},
+    "rulesetVersion": {"type": ["string", "null"]},
+    "effectiveAt": {"type": ["string", "null"], "format": "date-time"},
+    "warnings": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  },
+  "additionalProperties": true
+}

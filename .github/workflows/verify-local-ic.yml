@@ -1,4 +1,4 @@
-name: Verify local IC release
+name: Verify release
 on:
   pull_request:
   push:
@@ -17,6 +17,8 @@ jobs:
         with:
           python-version: '3.12'
       - run: node --check app.js
+      - run: node --check toll-core.js
+      - run: node --test tests/toll-core.test.cjs
       - run: python tools/package-release.py
       - uses: actions/upload-artifact@v4
         with:
