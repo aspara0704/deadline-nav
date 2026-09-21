@@ -100,6 +100,44 @@ jobs:
                   n=sum(term in json.dumps(f.get('properties') or {},ensure_ascii=False) for f in d.get('features',[]))
                   if n:matches.append((term,n))
               if matches:print(path.name,matches)
+
+          joints=json.load(open('/tmp/n06latest/N06-25_GML/UTF-8/N06-25_Joint.geojson',encoding='utf-8-sig'))
+          print('\nLATEST JOINT PROPERTY SAMPLE')
+          for f in joints.get('features',[])[:5]:
+              print(f.get('properties') or {}, (f.get('geometry') or {}).get('coordinates'))
+          print('\nLATEST JOINTS KYOTO-OSAKA BBOX')
+          shown=0
+          for f in joints.get('features',[]):
+              co=(f.get('geometry') or {}).get('coordinates')
+              if isinstance(co,list) and len(co)>=2:
+                  lng,lat=co[0],co[1]
+                  if isinstance(lng,(int,float)) and isinstance(lat,(int,float)) and 135.45 <= lng <= 135.85 and 34.60 <= lat <= 35.10:
+                      print(f.get('properties') or {}, co)
+                      shown+=1
+                      if shown>=120:break
+          print('bbox joint count shown',shown)
+
+          sections=json.load(open('/tmp/n06latest/N06-25_GML/UTF-8/N06-25_HighwaySection.geojson',encoding='utf-8-sig'))
+          print('\nLATEST SECTION PROPERTY SAMPLE')
+          for f in sections.get('features',[])[:5]:
+              print(f.get('properties') or {})
+          print('\nLATEST SECTIONS KYOTO-OSAKA BBOX')
+          shown=0
+          for f in sections.get('features',[]):
+              coords=(f.get('geometry') or {}).get('coordinates') or []
+              flat=[]
+              def walk2(x):
+                  if isinstance(x,list) and len(x)>=2 and all(isinstance(v,(int,float)) for v in x[:2]):
+                      flat.append((float(x[0]),float(x[1])))
+                  elif isinstance(x,list):
+                      for y in x:walk2(y)
+              walk2(coords)
+              if any(135.45 <= lng <= 135.85 and 34.60 <= lat <= 35.10 for lng,lat in flat):
+                  print(f.get('properties') or {})
+                  if flat: print(' endpoints',flat[0],flat[-1])
+                  shown+=1
+                  if shown>=80:break
+          print('bbox section count shown',shown)
           PY
       - name: Build graph from real source
         run: python3 tools/build-toll-graph.py /tmp/highway_point.geojson /tmp/highway_path.geojson /tmp/toll-road-graph.min.json
