@@ -10,7 +10,7 @@
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="apple-touch-icon" href="apple-touch-icon.png" />
   <title>Deadline Navi</title>
-  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="styles.css?v=070" />
 </head>
 <body>
   <main class="app-shell">
@@ -20,7 +20,7 @@
         <h1>間に合うなら、まだ下道で。</h1>
         <p class="brand-description">Deadline Naviは、高速道路へ切り替える最適なタイミングをリアルタイムに判断します。</p>
       </div>
-      <span class="version-chip">v0.6.5</span>
+      <span class="version-chip">v0.7.0</span>
     </header>
 
     <section class="card trip-card">
@@ -223,9 +223,9 @@
           <div class="section-head compact">
             <div>
               <h2>NAVITIME / RapidAPI</h2>
-              <p class="muted">IC検索とETC料金に使用します。</p>
+              <p class="muted">補助的なIC検索・料金取得に使用します。未設定や利用上限到達でも、Google/OSMで案内を継続します。</p>
             </div>
-            <span id="navitimeStatus" class="badge badge-warn">未設定</span>
+            <span id="navitimeStatus" class="badge badge-neutral">任意</span>
           </div>
           <div class="input-row">
             <label class="field grow">
@@ -256,10 +256,11 @@
     </details>
 
     <footer>
-      <p>Deadline Navi v0.6.5 — 運転中は画面を操作せず、安全な場所で設定してください。</p>
+      <p>Deadline Navi v0.7.0 — 運転中は画面を操作せず、安全な場所で設定してください。</p>
+      <p class="data-attribution">IC探索データの一部: <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap contributors</a></p>
     </footer>
   </main>
 
-  <script src="app.js"></script>
+  <script src="app.js?v=070"></script>
 </body>
 </html>

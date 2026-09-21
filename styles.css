@@ -313,3 +313,24 @@ body { background: #f4f6fa; }
 .voice-interval-row { display:flex; align-items:center; gap:10px; }
 .voice-interval-row input { width:100px; flex:0 0 100px; }
 .voice-interval-row span { color:var(--muted); font-size:14px; font-weight:650; }
+
+/* v0.7.0 driving-stable layout: data may refresh, geometry should not jump. */
+.decision-card { min-height: 154px; }
+.decision-subtext { min-height: 4.7em; max-height: 4.7em; overflow: hidden; }
+.switch-hero { min-height: 292px; }
+#switchRoad { min-height: 1.5em; }
+.metric-card { min-height: 112px; }
+.metric-note { min-height: 1.5em; }
+.location-value { min-height: 1.5em; font-variant-numeric: tabular-nums; }
+#localEta, #fastEta, #timeSaved, #slack,
+#switchArrival, #switchDeadline, #switchRemaining, #switchDestinationEta {
+  font-variant-numeric: tabular-nums;
+}
+.result-section, .monitor-card { overflow-anchor: none; }
+@media (max-width: 560px) {
+  .decision-card { min-height: 184px; }
+  .switch-hero { min-height: 410px; }
+  .metric-card { min-height: 108px; }
+}
+.data-attribution { margin-top: 6px; font-size: 11px; color: var(--muted); }
+.data-attribution a { color: inherit; }

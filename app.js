@@ -4,6 +4,8 @@
   const STORAGE_KEY_API = 'deadlineNavi.googleMapsApiKey';
   const STORAGE_KEY_NAVITIME = 'deadlineNavi.navitimeRapidApiKey';
   const STORAGE_KEY_FORM = 'deadlineNavi.formV05';
+  const STORAGE_KEY_IC_CATALOG = 'deadlineNavi.icCatalogV070';
+  const STORAGE_KEY_NAVITIME_BLOCK = 'deadlineNavi.navitimeBlockV070';
   const AUTO_NORMAL_INTERVAL_MS = 5 * 60_000;
   const AUTO_APPROACH_INTERVAL_MS = 3 * 60_000;
   const AUTO_CRITICAL_INTERVAL_MS = 60_000;
@@ -50,6 +52,24 @@
   const OVERPASS_MAX_SAMPLE_POINTS = 24;
   const OVERPASS_MIN_SAMPLE_STEP_KM = 42;
   const OSM_ROUTE_CACHE = new Map();
+  const OSM_CELL_CACHE = new Map();
+  const FARE_CACHE = new Map();
+  const IC_CATALOG_MAX = 900;
+  const OSM_DISCOVERY_RADIUS_KM = 14;
+  const OSM_DISCOVERY_CONCURRENCY = 2;
+  const V070_EXACT_LIMIT = 14;
+  const V070_GOOGLE_TOLL_LIMIT = 4;
+  const V070_NAVITIME_FARE_LIMIT = 2;
+  const FARE_CACHE_TTL_MS = 15 * 60_000;
+  const NAVITIME_IC_CALL_LIMIT = 3;
+
+  const BUILTIN_KANSAI_TOKAI_IC_NAMES = [
+    '京都東IC','京都南IC','巨椋池IC','久御山淀IC','大山崎IC','久御山IC','城陽IC','八幡京田辺IC',
+    '瀬田西IC','瀬田東IC','草津田上IC','栗東IC','竜王IC','蒲生スマートIC','八日市IC','湖東三山スマートIC','彦根IC','米原IC',
+    '甲賀土山IC','甲南IC','信楽IC','亀山IC','みえ川越IC','湾岸弥富IC','飛島IC','名港中央IC','東海IC','大府IC','豊明IC','豊田南IC','豊田東IC',
+    '岡崎IC','岡崎東IC','豊川IC','新城IC','浜松いなさIC','三ヶ日IC','浜松西IC','浜松浜北IC','磐田IC','遠州森町スマートIC',
+    '掛川IC','菊川IC','相良牧之原IC','島田金谷IC','吉田IC','焼津IC','静岡IC','新静岡IC','清水IC','新清水IC','新富士IC','富士IC'
+  ];
 
   const $ = (id) => document.getElementById(id);
 
@@ -123,6 +143,9 @@
   let lastDecisionSnapshot = null;
   let retainedCandidate = null;
   let retainedCandidateDestination = '';
+  let persistentIcCatalog = [];
+  let navitimeBlockedUntil = 0;
+  let navitimeBlockedReason = '';
   const autoMonitor = {
     active: false,
     watchId: null,
@@ -138,6 +161,7 @@
 
   function init() {
     restoreState();
+    restoreInfrastructureState();
     setDefaultDeadlineIfEmpty();
     refreshApiStatus();
     refreshNavitimeStatus();
@@ -274,6 +298,7 @@
     }
 
     runtimeNavitimeApiKey = key;
+    clearNavitimeBlock();
     const persisted = safeStorageSet(STORAGE_KEY_NAVITIME, key);
     refreshNavitimeStatus();
     showError(persisted ? '' : 'Safariのローカルファイルでは永続保存できないため、このタブ内だけRapidAPIキーを保持します。');
@@ -285,13 +310,55 @@
 
   function refreshNavitimeStatus() {
     const hasKey = Boolean(getNavitimeApiKey());
-    if (!hasKey) {
-      els.navitimeStatus.textContent = '未設定';
+    if (navitimeBlockedUntil > Date.now()) {
+      els.navitimeStatus.textContent = '利用上限・補助停止';
       els.navitimeStatus.className = 'badge badge-warn';
       return;
     }
-    els.navitimeStatus.textContent = persistentStorageAvailable ? '設定済み' : '設定済み（このタブ）';
+    if (!hasKey) {
+      els.navitimeStatus.textContent = '任意';
+      els.navitimeStatus.className = 'badge badge-neutral';
+      return;
+    }
+    els.navitimeStatus.textContent = persistentStorageAvailable ? '補助利用可' : '補助利用可（このタブ）';
     els.navitimeStatus.className = 'badge badge-good';
+  }
+
+  function restoreInfrastructureState() {
+    try {
+      const raw = JSON.parse(safeStorageGet(STORAGE_KEY_NAVITIME_BLOCK) || '{}');
+      navitimeBlockedUntil = Number(raw.until || 0);
+      navitimeBlockedReason = String(raw.reason || '');
+      if (navitimeBlockedUntil <= Date.now()) clearNavitimeBlock();
+    } catch (_) {
+      navitimeBlockedUntil = 0;
+      navitimeBlockedReason = '';
+    }
+    try {
+      const rawCatalog = JSON.parse(safeStorageGet(STORAGE_KEY_IC_CATALOG) || '[]');
+      persistentIcCatalog = Array.isArray(rawCatalog) ? rawCatalog.slice(0, IC_CATALOG_MAX) : [];
+    } catch (_) {
+      persistentIcCatalog = [];
+    }
+  }
+
+  function clearNavitimeBlock() {
+    navitimeBlockedUntil = 0;
+    navitimeBlockedReason = '';
+    safeStorageRemove(STORAGE_KEY_NAVITIME_BLOCK);
+  }
+
+  function canUseNavitime() {
+    return Boolean(getNavitimeApiKey()) && navitimeBlockedUntil <= Date.now();
+  }
+
+  function markNavitimeQuotaBlocked(reason = 'quota') {
+    const now = new Date();
+    const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1, 0, 5, 0, 0);
+    navitimeBlockedUntil = nextMonth.getTime();
+    navitimeBlockedReason = reason;
+    safeStorageSet(STORAGE_KEY_NAVITIME_BLOCK, JSON.stringify({ until: navitimeBlockedUntil, reason }));
+    refreshNavitimeStatus();
   }
 
   function refreshApiStatus() {
@@ -343,15 +410,11 @@
     showError('');
     if (autoMonitor.active) return;
     if (els.useDebugNow.checked) {
-      showError('自動監視では実時間を使います。デバッグ用の仮想時刻をOFFにしてください。');
+      showError('音声案内では実時間を使います。デバッグ用の仮想時刻をOFFにしてください。');
       return;
     }
     if (!getApiKey()) {
       showError('先にGoogle Maps APIキーを設定してください。');
-      return;
-    }
-    if (!getNavitimeApiKey()) {
-      showError('先にNAVITIMEの X-RapidAPI-Key を設定してください。');
       return;
     }
     if (!els.destination.value.trim()) {
@@ -390,8 +453,8 @@
       },
       (error) => {
         const msg = error.code === 1
-          ? '位置情報の利用が許可されていません。自動監視を停止しました。'
-          : '現在地を継続取得できません。自動監視を停止しました。';
+          ? '位置情報の利用が許可されていません。音声案内を終了しました。'
+          : '現在地を継続取得できません。音声案内を終了しました。';
         showError(msg);
         stopAutoMonitor();
       },
@@ -541,6 +604,10 @@
 
   function finalizeCalculationSnapshot(snapshot, source) {
     if (!snapshot) return;
+    // A transient background failure must not erase the last verified driving
+    // decision. Keeping the stable snapshot also prevents a recovery refresh
+    // from being announced as if the recommendation had suddenly changed.
+    if (source === 'auto' && (snapshot.mode === 'error' || snapshot.mode === 'incomplete')) return;
     if (source === 'auto') maybeNotifyDecisionChange(lastDecisionSnapshot, snapshot);
     if (snapshot.mode === 'candidate' && snapshot.candidate?.waypoint) {
       retainedCandidate = snapshot.candidate;
@@ -801,7 +868,7 @@
 
     showError('');
     persistFormState();
-    resetCandidateUi();
+    if (source === 'manual') resetCandidateUi();
 
     const apiKey = getApiKey();
     const navitimeApiKey = getNavitimeApiKey();
@@ -838,12 +905,7 @@
 
       const normalRequest = applyFutureDepartureTime({
         ...baseRequest,
-        fields: ['durationMillis', 'distanceMeters', 'localizedValues', 'travelAdvisory', 'legs', 'path'],
-        extraComputations: ['TOLLS'],
-        routeModifiers: {
-          vehicleInfo: { emissionType: 'GASOLINE' },
-          tollPasses: ['JP_ETC'],
-        },
+        fields: ['durationMillis', 'distanceMeters', 'localizedValues', 'legs', 'path'],
       }, now);
 
       const localRequest = applyFutureDepartureTime({
@@ -893,7 +955,7 @@
       if (normalEta > practicalDeadline) {
         els.candidateCount.textContent = '期限困難';
         els.candidateStatus.textContent = 'Google推奨ルートでも安全マージン込みの到着期限を超える見込みです。高速入口を変えても同じ経路エンジン上では期限達成を保証できないため、料金探索を省略しました。';
-        els.switchSummary.classList.add('hidden');
+        renderSwitchUnavailable('期限内に到着できる経路を確認できません', '交通状況を確認してください');
         snapshot = {
           mode: 'impossible',
           key: 'IMPOSSIBLE',
@@ -907,43 +969,31 @@
         return snapshot;
       }
 
-      if (!navitimeApiKey) {
-        els.tollPrice.textContent = 'ETC料金：NAVITIMEキー未設定';
-        els.candidateStatus.textContent = '下道では到着条件を満たさないため高速候補の料金比較が必要です。NAVITIMEの X-RapidAPI-Key を設定してください。';
-        snapshot = { mode: 'incomplete', key: 'NAVITIME_KEY_REQUIRED', now, practicalDeadline, localEta, localSlackMs, candidate: null };
-        finalizeCalculationSnapshot(snapshot, source);
-        return snapshot;
-      }
-
-      const normalFarePromise = updateNormalNavitimeFare(normalRoute, now, navitimeApiKey)
-        .catch((fareError) => {
-          console.warn('Normal NAVITIME fare failed:', fareError);
-          els.tollPrice.textContent = `ETC料金取得失敗：${shortError(fareError)}`;
-        });
-
       let candidateResult = null;
       try {
-        [, candidateResult] = await Promise.all([
-          normalFarePromise,
-          evaluateCandidates({
-            Route,
-            RouteMatrix,
-            origin,
-            destination,
-            now,
-            practicalDeadline,
-            localRoute,
-            normalRoute,
-            localDirectDurationMs,
-            normalDirectDurationMs,
-            navitimeApiKey,
-          }),
-        ]);
+        candidateResult = await evaluateCandidatesV070({
+          Route,
+          RouteMatrix,
+          origin,
+          destination,
+          now,
+          practicalDeadline,
+          localRoute,
+          normalRoute,
+          localDirectDurationMs,
+          normalDirectDurationMs,
+          navitimeApiKey,
+          source,
+        });
       } catch (candidateError) {
         console.error('Candidate evaluation failed:', candidateError);
         els.candidateStatus.textContent = `候補評価のみ失敗しました：${String(candidateError?.message || candidateError)}`;
-        showError('高速切替候補の計算に失敗しました。通信状況を確認して、再計算してください。');
-        snapshot = { mode: 'error', key: 'CANDIDATE_ERROR', now, practicalDeadline, localEta, localSlackMs, candidate: null };
+        if (source === 'auto') {
+          if (els.monitorDetail) els.monitorDetail.textContent = '候補更新に失敗しました。現在の表示を維持し、次回更新で再試行します。';
+        } else {
+          showError('高速切替候補の計算に失敗しました。通信状況を確認して、再計算してください。');
+        }
+        snapshot = { mode: 'error', key: 'CANDIDATE_ERROR', now, practicalDeadline, localEta, localSlackMs, candidate: lastDecisionSnapshot?.candidate || null };
         finalizeCalculationSnapshot(snapshot, source);
         return snapshot;
       }
@@ -1005,8 +1055,12 @@
       return snapshot;
     } catch (error) {
       console.error(error);
-      showError(normalizeApiError(error));
-      snapshot = { mode: 'error', key: 'CALCULATION_ERROR', now, candidate: null };
+      if (source === 'auto') {
+        if (els.monitorDetail) els.monitorDetail.textContent = '自動更新に失敗しました。現在の表示を維持し、次回更新で再試行します。';
+      } else {
+        showError(normalizeApiError(error));
+      }
+      snapshot = { mode: 'error', key: 'CALCULATION_ERROR', now, candidate: lastDecisionSnapshot?.candidate || null };
       finalizeCalculationSnapshot(snapshot, source);
       return snapshot;
     } finally {
@@ -1015,6 +1069,586 @@
       if (autoMonitor.active) updateAutoUi();
     }
   }
+
+  async function evaluateCandidatesV070({
+    Route,
+    RouteMatrix,
+    origin,
+    destination,
+    now,
+    practicalDeadline,
+    localRoute,
+    normalRoute,
+    localDirectDurationMs,
+    normalDirectDurationMs,
+    navitimeApiKey,
+    source,
+  }) {
+    const startedAt = performance.now();
+    const localPath = normalizeRoutePath(localRoute?.path);
+    const normalPath = normalizeRoutePath(normalRoute?.path);
+    if (localPath.length < 2) throw new Error('下道ルートの形状を取得できませんでした。');
+
+    const cumulative = cumulativePathDistances(localPath);
+    const routeTotalMeters = cumulative.at(-1) || Number(localRoute.distanceMeters || 0);
+    const checkpointResult = await evaluateSyntheticCheckpointBoundary({
+      Route,
+      RouteMatrix,
+      origin,
+      destination,
+      now,
+      practicalDeadline,
+      routePath: localPath,
+      cumulative,
+      localDirectDurationMs,
+      normalDirectDurationMs,
+    });
+
+    const discoveryPoints = v070DiscoveryPoints(localPath, cumulative, checkpointResult.boundary, routeTotalMeters);
+    let pool = await discoverCandidatePoolV070({
+      routePath: localPath,
+      discoveryPoints,
+      navitimeApiKey,
+      includeBuiltins: true,
+      destination,
+    });
+
+    let evaluated = await evaluateCandidatePoolV070({
+      Route,
+      RouteMatrix,
+      origin,
+      destination,
+      now,
+      practicalDeadline,
+      localDirectDurationMs,
+      normalDirectDurationMs,
+      candidates: pool,
+    });
+
+    // Invariant: if Google's recommended route is within the practical deadline,
+    // we must not conclude that there is no feasible highway entrance merely
+    // because the local-road corridor discovery missed a sideways/backtracking IC.
+    if (!evaluated.safe.length && normalPath.length >= 2) {
+      const normalCumulative = cumulativePathDistances(normalPath);
+      const horizon = Math.min(normalCumulative.at(-1) || 0, RECOVERY_ROUTE_HORIZON_M);
+      const recoveryPoints = [];
+      const targets = [0, 20_000, 45_000, 75_000, 110_000, horizon];
+      for (const target of targets) {
+        const point = interpolatePathAtDistance(normalPath, normalCumulative, Math.min(horizon, target));
+        if (point) recoveryPoints.push(point);
+      }
+      const recoveryPool = await discoverCandidatePoolV070({
+        routePath: normalPath,
+        discoveryPoints: recoveryPoints,
+        navitimeApiKey,
+        includeBuiltins: true,
+        destination,
+      });
+      pool = dedupeIcCandidatesV070([...pool, ...recoveryPool]);
+      evaluated = await evaluateCandidatePoolV070({
+        Route,
+        RouteMatrix,
+        origin,
+        destination,
+        now,
+        practicalDeadline,
+        localDirectDurationMs,
+        normalDirectDurationMs,
+        candidates: pool,
+      });
+    }
+
+    if (!evaluated.safe.length) {
+      const builtinFallback = dedupeIcCandidatesV070([
+        ...builtinCandidatesForRouteV070(localPath),
+        ...builtinCandidatesForRouteV070(normalPath),
+      ]);
+      if (builtinFallback.length) {
+        pool = dedupeIcCandidatesV070([...pool, ...builtinFallback]);
+        evaluated = await evaluateCandidatePoolV070({
+          Route,
+          RouteMatrix,
+          origin,
+          destination,
+          now,
+          practicalDeadline,
+          localDirectDurationMs,
+          normalDirectDurationMs,
+          candidates: pool,
+        });
+      }
+    }
+
+    if (!evaluated.safe.length) {
+      renderCandidateList([], null, now, practicalDeadline);
+      if (retainedCandidate && retainedCandidateDestination === destination) {
+        renderSwitchUnavailable(`前回候補 ${retainedCandidate.name}`, '現在の交通状況で再確認できていません');
+      } else {
+        renderSwitchUnavailable('高速入口を再確認中', 'Google推奨ルートは期限内です');
+      }
+      els.candidateStatus.textContent = 'Google推奨ルートは期限内ですが、高速入口候補を確定できませんでした。次回更新で再確認します。';
+      return { selected: null, display: evaluated.exact, pricedSafe: [], elapsedSec: (performance.now() - startedAt) / 1000 };
+    }
+
+    const priced = await priceFinalistsV070({
+      Route,
+      destination,
+      practicalDeadline,
+      candidates: evaluated.safe,
+      navitimeApiKey,
+    });
+
+    let selected = priced.selected;
+    if (selected) selected = await refineSwitchDeadline(Route, selected, destination, practicalDeadline, now);
+
+    const displayMap = new Map(evaluated.exact.filter((item) => item && !item.failed).map((item) => [item.id, item]));
+    priced.priced.forEach((item) => displayMap.set(item.id, item));
+    if (selected) displayMap.set(selected.id, selected);
+    const display = [...displayMap.values()].sort((a, b) => {
+      if (a.safe !== b.safe) return a.safe ? -1 : 1;
+      const ap = Number.isFinite(a.toll?.yen);
+      const bp = Number.isFinite(b.toll?.yen);
+      if (ap && bp) return (a.toll.yen - b.toll.yen) || (b.localDurationMs - a.localDurationMs);
+      if (ap !== bp) return ap ? -1 : 1;
+      return b.localDurationMs - a.localDurationMs;
+    });
+
+    renderCandidateList(display, selected?.id || null, now, practicalDeadline);
+    if (selected) renderSwitchSummary(selected, now, practicalDeadline);
+    else renderSwitchUnavailable('高速入口を再確認中', '到着条件を満たす候補はあります');
+
+    const elapsedSec = (performance.now() - startedAt) / 1000;
+    els.candidateStatus.textContent = selected
+      ? '到着条件を満たす入口を比較しました。料金が取得できない場合も、到着可能性を優先して案内を継続します。'
+      : '到着可能な入口を再確認しています。';
+    return { selected, display, pricedSafe: priced.priced.filter((x) => Number.isFinite(x.toll?.yen)), elapsedSec };
+  }
+
+  function v070DiscoveryPoints(routePath, cumulative, boundary, routeTotalMeters) {
+    const points = [];
+    const add = (point) => {
+      const p = readCoordinate(point);
+      if (!p) return;
+      if (!points.some((existing) => haversineMeters(existing, p) < 8_000)) points.push(p);
+    };
+    add(boundary?.safe?.waypoint);
+    add(boundary?.unsafe?.waypoint);
+    const progress = Number(boundary?.progress ?? boundary?.safe?.routeProgressMeters ?? routeTotalMeters * 0.35);
+    for (const offset of [-30_000, -12_000, 0, 18_000, 40_000]) {
+      add(interpolatePathAtDistance(routePath, cumulative, Math.max(0, Math.min(routeTotalMeters, progress + offset))));
+    }
+    return points.slice(0, 6);
+  }
+
+  async function discoverCandidatePoolV070({ routePath, discoveryPoints, navitimeApiKey, includeBuiltins, destination }) {
+    const cached = cachedIcCandidatesNearRouteV070(routePath, 45_000);
+    const retained = retainedCandidateDestination === destination && retainedCandidate
+      ? [{
+        id: retainedCandidate.id || `retained-${normalizeIcKey(retainedCandidate.name)}`,
+        navitimeIcId: retainedCandidate.navitimeIcId || null,
+        name: retainedCandidate.name,
+        road: retainedCandidate.road || '前回の推奨入口',
+        waypoint: retainedCandidate.waypoint,
+        mapWaypoint: candidateProjectionPointV070(retainedCandidate),
+        source: 'RETAINED',
+      }]
+      : [];
+    let pool = dedupeIcCandidatesV070([...retained, ...cached]);
+    const mappedNearby = pool.filter((candidate) => candidateProjectionPointV070(candidate)).length;
+
+    // Public Overpass is used only as a discovery fallback, in small independent
+    // cells.  This avoids the large multi-box queries that caused 504s in v0.4.x.
+    if (mappedNearby < 8 && discoveryPoints.length) {
+      const osm = await discoverOsmIcNearPointsV070(discoveryPoints);
+      rememberIcCandidatesV070(osm);
+      pool = dedupeIcCandidatesV070([...pool, ...osm]);
+    }
+
+    // NAVITIME is now optional. Use at most a few IC lookups only if the free
+    // discovery sources did not provide enough mapped candidates.
+    const mappedAfterOsm = pool.filter((candidate) => candidateProjectionPointV070(candidate)).length;
+    if (mappedAfterOsm < 8 && navitimeApiKey && canUseNavitime() && discoveryPoints.length) {
+      const nav = await discoverNavitimeIcLimitedV070(discoveryPoints, navitimeApiKey);
+      rememberIcCandidatesV070(nav);
+      pool = dedupeIcCandidatesV070([...pool, ...nav]);
+    }
+
+    // A named Kansai–Tokai catalog is a last-resort safety net, not the normal
+    // discovery path. Keeping it out of routine recalculations avoids dozens of
+    // unnecessary Route Matrix elements on every refresh.
+    if (includeBuiltins && pool.length < 8) {
+      pool = dedupeIcCandidatesV070([...pool, ...builtinCandidatesForRouteV070(routePath)]);
+    }
+
+    return pool;
+  }
+
+  function builtinCandidatesForRouteV070(routePath) {
+    if (!routeLooksKansaiTokaiV070(routePath)) return [];
+    return BUILTIN_KANSAI_TOKAI_IC_NAMES.map((name) => ({
+      id: `builtin-${normalizeIcKey(name)}`,
+      name,
+      road: '内蔵ICカタログ',
+      waypoint: `${name}, 日本`,
+      mapWaypoint: null,
+      source: 'BUILTIN',
+    }));
+  }
+
+  function routeLooksKansaiTokaiV070(routePath) {
+    if (!routePath.length) return false;
+    const lats = routePath.map((p) => p.lat);
+    const lngs = routePath.map((p) => p.lng);
+    const minLat = Math.min(...lats);
+    const maxLat = Math.max(...lats);
+    const minLng = Math.min(...lngs);
+    const maxLng = Math.max(...lngs);
+    return maxLat >= 34.0 && minLat <= 36.6 && maxLng >= 135.3 && minLng <= 139.3 && minLng >= 134.0 && maxLng <= 140.5;
+  }
+
+  function candidateProjectionPointV070(candidate) {
+    return readCoordinate(candidate?.mapWaypoint) || readCoordinate(candidate?.waypoint);
+  }
+
+  function cachedIcCandidatesNearRouteV070(routePath, maxDistanceMeters) {
+    if (!routePath.length || !persistentIcCatalog.length) return [];
+    return persistentIcCatalog.map((stored) => restoreStoredIcV070(stored))
+      .filter(Boolean)
+      .map((candidate) => {
+        const point = candidateProjectionPointV070(candidate);
+        if (!point) return candidate;
+        return { ...candidate, ...projectPointToRoute(point, routePath) };
+      })
+      .filter((candidate) => !Number.isFinite(candidate.corridorDistanceMeters) || candidate.corridorDistanceMeters <= maxDistanceMeters);
+  }
+
+  function restoreStoredIcV070(stored) {
+    const lat = Number(stored?.lat);
+    const lng = Number(stored?.lng);
+    if (!stored?.name || !Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    const mapWaypoint = { lat, lng };
+    const source = String(stored.source || 'CACHE');
+    return {
+      id: stored.id || `cache-${normalizeIcKey(stored.name)}-${lat.toFixed(4)}-${lng.toFixed(4)}`,
+      navitimeIcId: stored.navitimeIcId || null,
+      name: stored.name,
+      road: stored.road || '保存済みIC',
+      waypoint: source === 'NAVITIME_IC' ? mapWaypoint : `${stored.name}, 日本`,
+      mapWaypoint,
+      source,
+    };
+  }
+
+  function rememberIcCandidatesV070(candidates) {
+    const merged = new Map();
+    for (const stored of persistentIcCatalog) {
+      const key = `${normalizeIcKey(stored.name)}:${Number(stored.lat).toFixed(3)}:${Number(stored.lng).toFixed(3)}`;
+      merged.set(key, stored);
+    }
+    for (const candidate of candidates || []) {
+      const point = candidateProjectionPointV070(candidate);
+      if (!point || !candidate?.name) continue;
+      const stored = {
+        id: candidate.id || null,
+        navitimeIcId: candidate.navitimeIcId || null,
+        name: candidate.name,
+        road: candidate.road || '',
+        lat: point.lat,
+        lng: point.lng,
+        source: candidate.source || 'CACHE',
+        savedAt: Date.now(),
+      };
+      const key = `${normalizeIcKey(stored.name)}:${stored.lat.toFixed(3)}:${stored.lng.toFixed(3)}`;
+      merged.set(key, stored);
+    }
+    persistentIcCatalog = [...merged.values()]
+      .sort((a, b) => Number(b.savedAt || 0) - Number(a.savedAt || 0))
+      .slice(0, IC_CATALOG_MAX);
+    safeStorageSet(STORAGE_KEY_IC_CATALOG, JSON.stringify(persistentIcCatalog));
+  }
+
+  async function discoverOsmIcNearPointsV070(points) {
+    const unique = [];
+    for (const point of points) {
+      const p = readCoordinate(point);
+      if (!p) continue;
+      if (!unique.some((x) => haversineMeters(x, p) < 12_000)) unique.push(p);
+    }
+    const groups = await mapWithConcurrency(unique.slice(0, 5), OSM_DISCOVERY_CONCURRENCY, (point) => fetchOsmIcCellV070(point));
+    return dedupeIcCandidatesV070(groups.flat().filter(Boolean));
+  }
+
+  async function fetchOsmIcCellV070(point) {
+    const cellKey = `${(Math.round(point.lat * 20) / 20).toFixed(2)}:${(Math.round(point.lng * 20) / 20).toFixed(2)}`;
+    if (OSM_CELL_CACHE.has(cellKey)) return OSM_CELL_CACHE.get(cellKey);
+    const box = bboxAround(point, OSM_DISCOVERY_RADIUS_KM);
+    const query = `[out:json][timeout:12];node["highway"="motorway_junction"](${box.south.toFixed(5)},${box.west.toFixed(5)},${box.north.toFixed(5)},${box.east.toFixed(5)});out body;`;
+    let parsed = [];
+    for (const endpoint of OVERPASS_ENDPOINTS) {
+      try {
+        const controller = new AbortController();
+        const timeout = window.setTimeout(() => controller.abort(), 13_000);
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+          body: `data=${encodeURIComponent(query)}`,
+          signal: controller.signal,
+        });
+        window.clearTimeout(timeout);
+        if (!response.ok) continue;
+        const data = await response.json();
+        parsed = parseOverpassIcCandidates(data).map((candidate) => {
+          const mapWaypoint = readCoordinate(candidate.waypoint);
+          return {
+            ...candidate,
+            waypoint: `${candidate.name}, 日本`,
+            mapWaypoint,
+            road: candidate.road || 'OpenStreetMap',
+            source: 'OSM',
+          };
+        });
+        break;
+      } catch (error) {
+        console.warn('Small Overpass discovery failed:', endpoint, error);
+      }
+    }
+    OSM_CELL_CACHE.set(cellKey, parsed);
+    return parsed;
+  }
+
+  async function discoverNavitimeIcLimitedV070(points, apiKey) {
+    const out = [];
+    const unique = [];
+    for (const point of points) {
+      const p = readCoordinate(point);
+      if (!p) continue;
+      if (!unique.some((x) => haversineMeters(x, p) < 14_000)) unique.push(p);
+    }
+    for (const point of unique.slice(0, NAVITIME_IC_CALL_LIMIT)) {
+      if (!canUseNavitime()) break;
+      try {
+        const group = await fetchNavitimeIcSearch({ apiKey, coord: point, radiusMeters: NAVITIME_IC_SEARCH_RADIUS_M });
+        out.push(...group.map((candidate) => ({ ...candidate, mapWaypoint: readCoordinate(candidate.waypoint) })));
+      } catch (error) {
+        console.warn('NAVITIME IC discovery skipped:', error);
+        if (!canUseNavitime()) break;
+      }
+    }
+    return dedupeIcCandidatesV070(out);
+  }
+
+  function dedupeIcCandidatesV070(candidates) {
+    const rank = { RETAINED: 5, NAVITIME_IC: 4, CACHE: 3, OSM: 2, BUILTIN: 1 };
+    const byName = new Map();
+    for (const candidate of candidates || []) {
+      if (!candidate?.name) continue;
+      const key = normalizeIcKey(candidate.name);
+      if (!key) continue;
+      const existing = byName.get(key);
+      const score = rank[candidate.source] || 0;
+      const existingScore = rank[existing?.source] || 0;
+      if (!existing || score > existingScore || (candidate.navitimeIcId && !existing.navitimeIcId)) byName.set(key, candidate);
+    }
+    return [...byName.values()];
+  }
+
+  async function evaluateCandidatePoolV070({
+    Route,
+    RouteMatrix,
+    origin,
+    destination,
+    now,
+    practicalDeadline,
+    localDirectDurationMs,
+    normalDirectDurationMs,
+    candidates,
+  }) {
+    if (!candidates.length) return { exact: [], safe: [] };
+    let local = (await attachLocalMatrixChunked(RouteMatrix, origin, candidates, now))
+      .filter((candidate) => candidate.exists && Number.isFinite(candidate.localDurationMs) && candidate.localDurationMs > 0)
+      .filter((candidate) => candidate.localDurationMs <= Math.max(localDirectDurationMs * 1.12, normalDirectDurationMs + 3 * 60 * 60_000));
+    if (!local.length) return { exact: [], safe: [] };
+
+    // Keep matrix size bounded. Candidates closest to the observed route are
+    // preferred, but named built-in entries remain available as a safety net.
+    if (local.length > 70) {
+      local = local.sort((a, b) => (Number(a.corridorDistanceMeters ?? 99_000) - Number(b.corridorDistanceMeters ?? 99_000))
+        || (a.localDurationMs - b.localDurationMs)).slice(0, 70);
+    }
+
+    const fastApprox = await attachFastMatrixApproxChunkedV070(RouteMatrix, local, destination, now);
+    const combined = combineApproximateMatrixResults(local, fastApprox, now, practicalDeadline)
+      .filter((item) => item.fastApproxExists && item.approxTotalDurationMs > 0);
+    if (!combined.length) return { exact: [], safe: [] };
+
+    const byDeadline = combined.slice().sort((a, b) => {
+      const ag = Math.abs(practicalDeadline.getTime() - a.approxEta.getTime());
+      const bg = Math.abs(practicalDeadline.getTime() - b.approxEta.getTime());
+      return ag - bg;
+    });
+    const approxSafeLatest = combined.filter((x) => x.approxSafe).sort((a, b) => b.localDurationMs - a.localDurationMs).slice(0, 6);
+    const earliest = combined.slice().sort((a, b) => a.localDurationMs - b.localDurationMs).slice(0, 3);
+    const retained = combined.filter((x) => x.source === 'RETAINED');
+    const exactPool = dedupeIcCandidatesV070([
+      ...retained,
+      ...byDeadline.slice(0, 8),
+      ...approxSafeLatest,
+      ...earliest,
+    ]).slice(0, V070_EXACT_LIMIT);
+
+    let exact = await mapWithConcurrency(exactPool, 4, (candidate) => evaluateCandidateTiming({
+      Route,
+      candidate,
+      destination,
+      now,
+      practicalDeadline,
+      localDirectDurationMs,
+    }));
+    exact = exact.filter((item) => item && !item.failed);
+    let safe = exact.filter((item) => item.safe);
+
+    // If the coarse matrix was misleading, explicitly probe a few of the
+    // quickest-to-reach entrances before declaring discovery failure.
+    if (!safe.length) {
+      const extra = combined.slice().sort((a, b) => a.localDurationMs - b.localDurationMs)
+        .filter((candidate) => !exact.some((x) => x.id === candidate.id)).slice(0, 5);
+      const extraExact = await mapWithConcurrency(extra, 3, (candidate) => evaluateCandidateTiming({
+        Route,
+        candidate,
+        destination,
+        now,
+        practicalDeadline,
+        localDirectDurationMs,
+      }));
+      exact = [...exact, ...extraExact.filter((item) => item && !item.failed)];
+      safe = exact.filter((item) => item.safe);
+    }
+
+    return { exact: dedupeCandidates(exact), safe: dedupeCandidates(safe) };
+  }
+
+  async function attachFastMatrixApproxChunkedV070(RouteMatrix, candidates, destination, departureTime) {
+    const out = [];
+    for (let i = 0; i < candidates.length; i += 25) {
+      const chunk = candidates.slice(i, i + 25);
+      const result = await attachFastMatrixApprox(RouteMatrix, chunk, destination, departureTime);
+      out.push(...result);
+    }
+    return out;
+  }
+
+  async function priceFinalistsV070({ Route, destination, practicalDeadline, candidates, navitimeApiKey }) {
+    const safe = candidates.filter((item) => item?.safe).slice();
+    const latest = safe.sort((a, b) => b.localDurationMs - a.localDurationMs);
+    const pricingPool = dedupeIcCandidatesV070([
+      ...latest.slice(0, 3),
+      ...selectLocalDurationRepresentativesV070(latest.slice(3), 1),
+    ]).slice(0, V070_GOOGLE_TOLL_LIMIT);
+
+    let priced = await mapWithConcurrency(pricingPool, 2, (candidate) => priceCandidateGoogleV070(Route, candidate, destination, practicalDeadline));
+
+    // Google accepts JP_ETC in the request, but a supported toll pass enum does
+    // not guarantee an estimated price for every Japanese route. NAVITIME is a
+    // strictly limited fallback for missing prices, never a prerequisite.
+    if (navitimeApiKey && canUseNavitime()) {
+      let used = 0;
+      const updated = [];
+      for (const candidate of priced) {
+        if (Number.isFinite(candidate.toll?.yen) || used >= V070_NAVITIME_FARE_LIMIT || !canUseNavitime()) {
+          updated.push(candidate);
+          continue;
+        }
+        try {
+          if (!candidate.endpoints?.goal) {
+            updated.push(candidate);
+            continue;
+          }
+          const fare = await fetchNavitimeEtcFare({
+            apiKey: navitimeApiKey,
+            start: candidate.endpoints?.start || candidate.waypoint,
+            startIcId: candidate.navitimeIcId || null,
+            goal: candidate.endpoints.goal,
+            departureTime: candidate.icArrival,
+            startName: candidate.name,
+            forceTollStart: !candidate.navitimeIcId,
+          });
+          updated.push({ ...candidate, toll: fare, navitimeFareError: null });
+          FARE_CACHE.set(`${normalizeIcKey(candidate.name)}|${String(destination).trim()}`, { toll: fare, at: Date.now() });
+          used += 1;
+        } catch (error) {
+          console.warn('NAVITIME fare fallback skipped:', candidate.name, error);
+          updated.push({ ...candidate, navitimeFareError: shortError(error) });
+          used += 1;
+        }
+      }
+      priced = updated;
+    }
+
+    const known = priced.filter((item) => Number.isFinite(item.toll?.yen));
+    const pricingComplete = priced.length > 0 && known.length === priced.length;
+    let selected = null;
+    let basis = 'time';
+    if (known.length >= 2) {
+      selected = known.slice().sort((a, b) => (a.toll.yen - b.toll.yen)
+        || (b.localDurationMs - a.localDurationMs))[0];
+      basis = pricingComplete ? 'price_complete' : 'price_partial';
+    } else if (known.length === 1 && priced.length === 1) {
+      selected = known[0];
+      basis = 'price_complete';
+    } else {
+      selected = latest[0] || known[0] || null;
+    }
+    if (selected) selected = { ...selected, selectionBasis: basis };
+    return { selected, priced, pricingComplete };
+  }
+
+  function selectLocalDurationRepresentativesV070(candidates, limit) {
+    if (!candidates.length || limit <= 0) return [];
+    const ordered = candidates.slice().sort((a, b) => a.localDurationMs - b.localDurationMs);
+    if (ordered.length <= limit) return ordered;
+    const out = [];
+    for (let i = 0; i < limit; i += 1) {
+      const index = Math.round((ordered.length - 1) * ((i + 1) / (limit + 1)));
+      out.push(ordered[index]);
+    }
+    return out;
+  }
+
+  async function priceCandidateGoogleV070(Route, candidate, destination, practicalDeadline) {
+    const cacheKey = `${normalizeIcKey(candidate.name)}|${String(destination).trim()}`;
+    const cached = FARE_CACHE.get(cacheKey);
+    if (cached && Date.now() - cached.at < FARE_CACHE_TTL_MS) {
+      return { ...candidate, toll: cached.toll, googleTollChecked: true };
+    }
+    try {
+      const fastRoute = await computeFastLeg(Route, candidate.waypoint, destination, candidate.icArrival, { includeTolls: true });
+      if (!fastRoute) return { ...candidate, toll: { text: '料金未取得', yen: null, source: 'Google' }, googleTollChecked: true };
+      const durationMs = Number(fastRoute.durationMillis || candidate.fastDurationMs || 0);
+      const tollRaw = extractTollMoney(fastRoute);
+      const toll = { ...tollRaw, source: 'Google' };
+      const totalDurationMs = candidate.localDurationMs + durationMs;
+      const destinationEta = new Date(candidate.icArrival.getTime() + durationMs);
+      const switchDeadline = new Date(practicalDeadline.getTime() - durationMs);
+      const endpoints = routeEndpoints(fastRoute) || candidate.endpoints;
+      FARE_CACHE.set(cacheKey, { toll, at: Date.now() });
+      return {
+        ...candidate,
+        fastDurationMs: durationMs,
+        totalDurationMs,
+        destinationEta,
+        switchDeadline,
+        endpoints,
+        toll,
+        googleTollChecked: true,
+      };
+    } catch (error) {
+      console.warn('Google toll estimate unavailable:', candidate.name, error);
+      const toll = { text: '料金未取得', yen: null, source: 'Google' };
+      FARE_CACHE.set(cacheKey, { toll, at: Date.now() });
+      return { ...candidate, toll, googleTollChecked: true };
+    }
+  }
+
 
   async function evaluateCandidates({
     Route,
@@ -1656,6 +2290,7 @@
   }
 
   async function fetchNavitimeIcSearch({ apiKey, coord, radiusMeters = 10_000 }) {
+    if (!apiKey || !canUseNavitime()) throw new Error('NAVITIME補助は現在利用できません。');
     const cacheKey = `${coord.lat.toFixed(2)},${coord.lng.toFixed(2)}:${Math.round(radiusMeters)}`;
     if (NAVITIME_IC_CACHE.has(cacheKey)) return NAVITIME_IC_CACHE.get(cacheKey);
 
@@ -1685,6 +2320,7 @@
     try { data = rawText ? JSON.parse(rawText) : null; } catch (_) { /* keep text */ }
     if (!response.ok) {
       const detail = data?.message || data?.error || data?.errors || rawText || response.statusText;
+      if (response.status === 429) markNavitimeQuotaBlocked('monthly_quota');
       throw new Error(`NAVITIME IC検索 HTTP ${response.status}: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`);
     }
 
@@ -1844,7 +2480,7 @@
     const totalDurationMs = candidate.localDurationMs + fastDurationMs;
     const destinationEta = new Date(now.getTime() + totalDurationMs);
     const switchDeadline = new Date(practicalDeadline.getTime() - fastDurationMs);
-    const googleToll = extractTollMoney(fastRoute);
+    const googleToll = { text: '未取得', yen: null };
     const safe = destinationEta <= practicalDeadline;
     const timeSavedMs = Math.max(0, localDirectDurationMs - totalDurationMs);
     const endpoints = routeEndpoints(fastRoute);
@@ -2383,20 +3019,25 @@
     return 2 * radius * Math.asin(Math.min(1, Math.sqrt(h)));
   }
 
-  async function computeFastLeg(Route, origin, destination, departureTime) {
+  async function computeFastLeg(Route, origin, destination, departureTime, options = {}) {
+    const includeTolls = Boolean(options.includeTolls);
     const request = {
       origin,
       destination,
       travelMode: 'DRIVING',
       routingPreference: 'TRAFFIC_AWARE',
       language: 'ja',
-      fields: ['durationMillis', 'distanceMeters', 'travelAdvisory', 'legs'],
-      extraComputations: ['TOLLS'],
-      routeModifiers: {
+      fields: includeTolls
+        ? ['durationMillis', 'distanceMeters', 'travelAdvisory', 'legs']
+        : ['durationMillis', 'distanceMeters', 'legs'],
+    };
+    if (includeTolls) {
+      request.extraComputations = ['TOLLS'];
+      request.routeModifiers = {
         vehicleInfo: { emissionType: 'GASOLINE' },
         tollPasses: ['JP_ETC'],
-      },
-    };
+      };
+    }
 
     // Routes Library only accepts an explicitly supplied departureTime when it
     // is in the future. For an immediate departure, omit the field and Google
@@ -2492,10 +3133,16 @@
     }
 
     const remainingMs = candidate.switchDeadline.getTime() - now.getTime();
-    const hasNavitimeFare = Number.isFinite(candidate.toll?.yen) && candidate.toll?.source === 'NAVITIME';
-    els.switchModeLabel.textContent = hasNavitimeFare
-      ? '期限直前候補を含む比較範囲でETC料金が最安'
-      : '料金比較不能：時間ベースの暫定候補';
+    const hasFare = Number.isFinite(candidate.toll?.yen);
+    if (candidate.selectionBasis === 'price_complete') {
+      els.switchModeLabel.textContent = '到着条件を満たす候補の中で料金最小';
+    } else if (candidate.selectionBasis === 'price_partial') {
+      els.switchModeLabel.textContent = '取得できた料金の中で最小';
+    } else if (hasFare) {
+      els.switchModeLabel.textContent = '到着条件を満たす高速入口';
+    } else {
+      els.switchModeLabel.textContent = '到着条件を優先した暫定候補';
+    }
     els.switchIc.textContent = candidate.name;
     els.switchRoad.textContent = candidate.road;
     els.switchArrival.textContent = formatMoment(candidate.icArrival, now);
@@ -2514,6 +3161,20 @@
     }
     els.switchDestinationEta.textContent = formatMoment(candidate.destinationEta, now);
     els.switchToll.textContent = formatToll(candidate);
+    els.tollPrice.textContent = hasFare ? `ETC ${formatToll(candidate)}` : 'ETC料金は取得できませんでした';
+    els.switchSummary.classList.remove('hidden');
+  }
+
+  function renderSwitchUnavailable(title, note = '') {
+    els.switchModeLabel.textContent = '現在の案内';
+    els.switchIc.textContent = title || '再確認中';
+    els.switchRoad.textContent = note || '経路を再確認しています';
+    els.switchArrival.textContent = '—';
+    els.switchDeadline.textContent = '—';
+    els.switchRemaining.textContent = '—';
+    if (els.navChangeAdvice) els.navChangeAdvice.textContent = '—';
+    els.switchDestinationEta.textContent = '—';
+    els.switchToll.textContent = '—';
     els.switchSummary.classList.remove('hidden');
   }
 
@@ -2722,7 +3383,7 @@
     els.localDuration.textContent = formatDuration(localDurationMs);
     els.fastDuration.textContent = formatDuration(normalDurationMs);
     els.timeSaved.textContent = timeSavedMs > 0 ? formatDuration(timeSavedMs) : 'ほぼ同じ';
-    els.tollPrice.textContent = 'ETC料金 NAVITIME取得中…';
+    els.tollPrice.textContent = '料金は候補確定後に表示';
     els.slack.textContent = formatSignedDuration(slackMs);
     els.localDistance.textContent = formatDistance(localRoute.distanceMeters);
     els.fastDistance.textContent = formatDistance(normalRoute.distanceMeters);
@@ -2792,6 +3453,7 @@
   }
 
   async function fetchNavitimeEtcFare({ apiKey, start, startIcId = null, goal, departureTime, startName = '高速入口', forceTollStart = false }) {
+    if (!apiKey || !canUseNavitime()) throw new Error('NAVITIME補助は現在利用できません。');
     const params = new URLSearchParams();
     const startPoint = startIcId
       ? { ic: String(startIcId), name: startName }
@@ -2828,6 +3490,7 @@
 
     if (!response.ok) {
       const detail = data?.message || data?.error || data?.errors || rawText || response.statusText;
+      if (response.status === 429) markNavitimeQuotaBlocked('monthly_quota');
       throw new Error(`NAVITIME HTTP ${response.status}: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`);
     }
 
@@ -2891,10 +3554,12 @@
 
   function formatToll(candidate) {
     const toll = candidate?.toll;
-    if (Number.isFinite(toll?.yen) && toll?.source === 'NAVITIME') return `${toll.text}（NAVITIME）`;
-    if (candidate?.navitimeFareError) return '取得失敗';
-    if (toll?.text) return `${toll.text}（Google参考）`;
-    return '—';
+    if (Number.isFinite(toll?.yen)) {
+      if (toll?.source === 'NAVITIME') return `${toll.text}（NAVITIME）`;
+      if (toll?.source === 'Google') return `${toll.text}（Google推定）`;
+      return toll.text || `${Math.round(toll.yen).toLocaleString('ja-JP')}円`;
+    }
+    return '料金未取得';
   }
 
   function shortError(error) {
