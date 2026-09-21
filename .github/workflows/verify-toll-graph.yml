@@ -1,0 +1,63 @@
+name: Verify toll road graph
+
+on:
+  pull_request:
+    paths:
+      - 'tools/build-osm-toll-graph.py'
+      - 'tests/osm-toll-graph.test.cjs'
+      - 'TOLL-GRAPH-NOTICE.md'
+      - '.github/workflows/verify-toll-graph.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kansai-pilot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install OSM reader
+        run: python3 -m pip install --quiet osmium
+      - name: Unit tests
+        run: node --test tests/osm-toll-graph.test.cjs
+      - name: Download pinned Kansai OSM extract
+        run: |
+          curl --fail --location --retry 3 \
+            'https://download.geofabrik.de/asia/japan/kansai-260920.osm.pbf' \
+            --output /tmp/kansai.osm.pbf
+      - name: Build compact expressway graph
+        run: |
+          python3 tools/build-osm-toll-graph.py \
+            /tmp/kansai.osm.pbf \
+            /tmp/toll-road-graph-kansai.min.json \
+            --source-label 'Geofabrik Kansai 2026-09-20'
+      - name: Verify reference corridor connectivity
+        run: |
+          python3 - <<'PY'
+          import json,importlib.util
+          spec=importlib.util.spec_from_file_location('m','tools/build-osm-toll-graph.py')
+          m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+          g=json.load(open('/tmp/toll-road-graph-kansai.min.json',encoding='utf-8'))
+          required=['久御山南IC','枚方東IC','巨椋池IC','京都南IC']
+          for name in required:
+              key=m.normalize_name(name)
+              assert key in g['junctionIndex'] and g['junctionIndex'][key], (name,key)
+          start=g['junctionIndex'][m.normalize_name('久御山南IC')]
+          goal=g['junctionIndex'][m.normalize_name('枚方東IC')]
+          d,path=m.shortest_distance(g,start,goal)
+          assert d is not None and 5 < d < 30, d
+          print('久御山南IC -> 枚方東IC shortest graph distance km:',round(d,3))
+          print('roads:',sorted({e.get('road') for e in path if e.get('road')}))
+          print(json.dumps(g['meta'],ensure_ascii=False,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: toll-road-graph-kansai-pilot
+          path: /tmp/toll-road-graph-kansai.min.json
