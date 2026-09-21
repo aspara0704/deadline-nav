@@ -247,6 +247,14 @@
                 <button id="setDebugNowReal" class="button secondary compact-button" type="button">実時間を入力</button>
               </div>
             </label>
+            <section class="diagnostic-panel" aria-labelledby="icCatalogHeading">
+              <h3 id="icCatalogHeading">全国ICカタログ</h3>
+              <p id="icCatalogStatus" role="status">全国ICカタログを読み込み中…</p>
+            </section>
+            <section class="diagnostic-panel" aria-labelledby="apiUsageHeading">
+              <h3 id="apiUsageHeading">API使用量</h3>
+              <pre id="apiUsageDiag" class="diagnostic-output" aria-live="polite">API使用量を読み込み中…</pre>
+            </section>
             <button id="googleDiag" class="button secondary" type="button">Google APIを診断</button>
             <pre id="googleDiagResult" class="diagnostic-output hidden" aria-live="polite"></pre>
             <p class="caution">この領域は開発用です。通常利用では変更する必要はありません。</p>
@@ -264,4 +272,3 @@
   <script src="app.js?v=072-local1"></script>
 </body>
 </html>
-

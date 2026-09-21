@@ -4,12 +4,13 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const catalog = JSON.parse(fs.readFileSync('ic-data.min.json', 'utf8'));
 const original = fs.readFileSync('app.js', 'utf8');
+const html = fs.readFileSync('index.html', 'utf8');
 function app(payload = catalog, legacy = []) {
-  const elements = new Map();
+  const elements = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(m => [m[1], {}]));
   const calls = [];
   const context = {
     console: {warn() {}},
-    document: {getElementById(id) {if (!elements.has(id)) elements.set(id, {}); return elements.get(id);}},
+    document: {getElementById(id) {return elements.get(id) || null;}},
     fetch: async url => {calls.push(url); assert.match(url, /^\.\/ic-data\.min\.json\?/); if (payload instanceof Error) throw payload; return {ok:true, json:async()=>payload};},
     legacy,
   };
