@@ -14,7 +14,7 @@ function app(payload = catalog, legacy = []) {
     fetch: async url => {calls.push(url); assert.match(url, /^\.\/ic-data\.min\.json\?/); if (payload instanceof Error) throw payload; return {ok:true, json:async()=>payload};},
     legacy,
   };
-  const source = original.replace('  init();', '  nationalIcCatalog = legacy;').replace(/\}\)\(\);\s*$/, `globalThis.api = {ensureNationalIcCatalogV072, discoverCandidatePoolV070, fetchOsmIcCellV070, discoverInterchangesAlongRoute, fetchNavitimeIcSearch, getMeta:()=>nationalIcMeta, usage:()=>apiUsageCurrent, prefilterDiscoveredCandidatesV071, beginApiUsageCalculation, selectUnevaluatedCandidatesV074};})();`);
+  const source = original.replace('  init();', '  nationalIcCatalog = legacy;').replace(/\}\)\(\);\s*$/, `globalThis.api = {ensureNationalIcCatalogV072, discoverCandidatePoolV070, fetchOsmIcCellV070, discoverInterchangesAlongRoute, fetchNavitimeIcSearch, getMeta:()=>nationalIcMeta, usage:()=>apiUsageCurrent, prefilterDiscoveredCandidatesV071, beginApiUsageCalculation, selectUnevaluatedCandidatesV074, shouldUseLightweightCandidateV075};})();`);
   vm.runInNewContext(source, context);
   return {...context.api, calls, elements};
 }
@@ -86,8 +86,8 @@ test('v0.7.3 matrix prefilter keeps requested hard limits', () => {
   assert.equal(a.prefilterDiscoveredCandidatesV071(make(40), 8).length, 8);
 });
 
-test('v0.7.4 budget constants and version are present', () => {
-  assert.match(original, /CURRENT_APP_VERSION = '0\.7\.4'/);
+test('v0.7.5 budget constants and version are present', () => {
+  assert.match(original, /CURRENT_APP_VERSION = '0\.7\.5'/);
   assert.match(original, /NATIONAL_IC_PREFILTER_LIMIT = 12/);
   assert.match(original, /NATIONAL_IC_RECOVERY_LIMIT = 18/);
   assert.match(original, /V073_BUILTIN_FALLBACK_LIMIT = 8/);
@@ -131,4 +131,16 @@ test('v0.7.4 evaluation set resets for a new calculation', () => {
   assert.equal(a.selectUnevaluatedCandidatesV074(candidate, 12).selected.length, 0);
   a.beginApiUsageCalculation();
   assert.equal(a.selectUnevaluatedCandidatesV074(candidate, 12).selected.length, 1);
+});
+
+
+test('v0.7.5 lightweight update is gated to auto refresh of the retained recommendation', () => {
+  const a = app();
+  const candidate = {name:'枚方東IC', waypoint:{lat:34.8,lng:135.7}};
+  const snapshot = {mode:'candidate', candidate};
+  assert.equal(a.shouldUseLightweightCandidateV075('auto', '大阪', snapshot, candidate, '大阪'), true);
+  assert.equal(a.shouldUseLightweightCandidateV075('manual', '大阪', snapshot, candidate, '大阪'), false);
+  assert.equal(a.shouldUseLightweightCandidateV075('auto', '神戸', snapshot, candidate, '大阪'), false);
+  assert.equal(a.shouldUseLightweightCandidateV075('auto', '大阪', {mode:'no_toll'}, candidate, '大阪'), false);
+  assert.equal(a.shouldUseLightweightCandidateV075('auto', '大阪', snapshot, {name:'枚方東IC'}, '大阪'), false);
 });
