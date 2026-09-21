@@ -725,7 +725,7 @@
     if (guidance.level === 'prepare') {
       return `まだ現在のルートを走れますが、ナビ変更の目安まであと約${remainingMin}分です。${changeTime}ごろまでに、${candidate.name}へ向かう設定に変更してください。`;
     }
-    return `今はそのまま走って大丈夫です。カーナビを${candidate.name}に変更する目安は、あと約${remainingMin}分、${changeTime}ごろです。`;
+    return `引き続き、現在のルートをお進みください。カーナビを${candidate.name}に変更する目安は、あと約${remainingMin}分、${changeTime}ごろです。`;
   }
 
   function buildNavUrgencyVoiceMessage(candidate) {
