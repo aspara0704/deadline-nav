@@ -208,6 +208,83 @@ class OSMCollector(osmium.SimpleHandler):
         self.ways.append({"id": int(w.id), "nodes": nodes, "tags": tags})
 
 
+def junction_access_costs(graph, name, radius_km=0.9):
+    key = normalize_name(name)
+    anchors = graph.get("junctionIndex", {}).get(key) or []
+    if not anchors:
+        return {}
+    nodes = graph.get("nodes", [])
+    by_id = {int(n["id"]): n for n in nodes}
+    anchor_points = []
+    for node_id in anchors:
+        n = by_id.get(int(node_id))
+        if n:
+            anchor_points.append((float(n["lat"]), float(n["lng"])))
+    if not anchor_points:
+        return {}
+
+    incident = set()
+    for e in graph.get("edges", []):
+        incident.add(int(e["from"]))
+        incident.add(int(e["to"]))
+
+    out = {}
+    for n in nodes:
+        node_id = int(n["id"])
+        if node_id not in incident:
+            continue
+        p = (float(n["lat"]), float(n["lng"]))
+        access_km = min(haversine_km(p, a) for a in anchor_points)
+        if access_km <= radius_km:
+            out[node_id] = access_km
+    return out
+
+
+def junction_access_ids(graph, name, radius_km=0.9):
+    return sorted(junction_access_costs(graph, name, radius_km))
+
+
+def shortest_distance_with_endpoint_costs(graph, start_costs, goal_costs):
+    import heapq
+    goals = {int(k): float(v) for k, v in goal_costs.items()}
+    adj = {}
+    for edge in graph.get("edges", []):
+        adj.setdefault(int(edge["from"]), []).append((int(edge["to"]), float(edge["km"]), edge))
+
+    pq = [(float(cost), int(node), []) for node, cost in start_costs.items()]
+    heapq.heapify(pq)
+    best = {}
+    best_total = float("inf")
+    best_path = []
+    while pq:
+        dist, node, path = heapq.heappop(pq)
+        if dist >= best.get(node, float("inf")):
+            continue
+        if dist >= best_total:
+            continue
+        best[node] = dist
+        if node in goals:
+            total = dist + goals[node]
+            if total < best_total:
+                best_total = total
+                best_path = path
+        for nxt, km, edge in adj.get(node, []):
+            nd = dist + km
+            if nd < best.get(nxt, float("inf")) and nd < best_total:
+                heapq.heappush(pq, (nd, nxt, path + [edge]))
+    if not math.isfinite(best_total):
+        return None, []
+    return best_total, best_path
+
+
+def shortest_distance_between_junctions(graph, start_name, goal_name, radius_km=0.9):
+    start_costs = junction_access_costs(graph, start_name, radius_km)
+    goal_costs = junction_access_costs(graph, goal_name, radius_km)
+    if not start_costs or not goal_costs:
+        return None, []
+    return shortest_distance_with_endpoint_costs(graph, start_costs, goal_costs)
+
+
 def shortest_distance(graph, start_ids, goal_ids):
     import heapq
     goals = set(int(x) for x in goal_ids)

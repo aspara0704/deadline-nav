@@ -67,3 +67,20 @@ print(json.dumps({'d':d,'n':len(p)}))
   assert.equal(r.d,12);
   assert.equal(r.n,2);
 });
+
+
+test('junction access neighborhood can represent both carriageways around an IC', () => {
+  const expr = String.raw`
+ways=[
+ {'id':1,'tags':{'highway':'motorway','oneway':'yes'},'nodes':[
+  {'ref':1,'lat':35,'lng':135},{'ref':2,'lat':35,'lng':135.003},{'ref':3,'lat':35,'lng':135.006}]},
+ {'id':2,'tags':{'highway':'motorway','oneway':'yes'},'nodes':[
+  {'ref':4,'lat':35.002,'lng':135.006},{'ref':5,'lat':35.002,'lng':135.003},{'ref':6,'lat':35.002,'lng':135}]}
+]
+junctions={2:{'name':'AIC','ref':'1'},5:{'name':'AIC','ref':'1'}}
+g=m.build_graph_from_records(ways,junctions)
+print(json.dumps({'ids':m.junction_access_ids(g,'AIC',0.5)},ensure_ascii=False))
+`;
+  const r=py(expr);
+  assert.equal(r.ids.length,6);
+});
