@@ -11,6 +11,10 @@
     "basis": {"type": "string"},
     "rulesetVersion": {"type": ["string", "null"]},
     "effectiveAt": {"type": ["string", "null"], "format": "date-time"},
+    "vehicle": {"type": ["string", "null"]},
+    "payment": {"type": ["string", "null"]},
+    "discountPolicy": {"type": ["string", "null"]},
+    "sourceUrls": {"type": "array", "items": {"type": "string", "format": "uri"}},
     "warnings": {
       "type": "array",
       "items": {"type": "string"}
