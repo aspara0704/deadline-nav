@@ -2,47 +2,51 @@
 
 「間に合うなら、まだ下道で。」
 
-v0.7.2 は、v0.7.1 から **IC候補データのローカル化だけ**を変更した版です。Route Matrix の削減、探索アルゴリズムの差分化、料金ロジックの変更はこの版では行っていません。
+この版の変更範囲は **IC候補データのローカル化とその検証**です。Matrix探索・料金取得ロジックは変更していません。
 
-## v0.7.2 の変更点
+## 同梱ICカタログ
 
-- 全国ICカタログを `ic-data.min.json` として Deadline Navi と同じ GitHub Pages から配信します。
-- 走行中のIC発見では **Overpass を呼びません**。
-- 走行中のIC発見では **NAVITIME `/ic` を呼びません**。
-- NAVITIME は従来どおり、料金取得の補助にだけ残しています。
-- v0.7.1 で端末に保存済みの全国ICカタログがある場合は、一度だけ移行用のローカルデータとして利用できます。
-- API使用量診断では通常、`NAVITIME IC: 0 req`、`Overpass: 0 req` になることが v0.7.2 の合格条件です。
+- `ic-data.min.json` は生成済みの2,085件をリポジトリ・配布ZIPに同梱します。初回起動時の外部データ生成は不要です。
+- アプリは同じ配信元の静的ファイルだけを読みます。GitHub/raw/Overpass/NAVITIMEへの外部IC検索は行いません。GitHub Pages自体を配信元にする場合の静的アセット通信はあります。
+- 全国カタログは元データの収録範囲に依存します。「同梱」は現存する全IC・全方向の完全網羅を意味しません。
+- JCT併設ICは元データで名称にICを含むものを抽出します。JCT単独の地点は追加しません。
+- 元データにない巨椋池ICは、出典付きの `tools/ic-supplement.json` で補完します。座標はIC代表点で、入口ランプの誘導点としての保証はありません。
+- 起動処理と候補探索は同じ読み込み処理を共有し、旧版キャッシュがあっても同梱データの確認を待ちます。
+- 読み込み・検証失敗時だけ旧版キャッシュへ退避します。キャッシュ利用と同梱利用は診断で区別します。どちらも利用できなければ内蔵候補のみで継続し、失敗を表示します。
+- NAVITIME料金取得の補助は従来どおりです。IC検索のゼロ件条件とは区別します。
 
-## 全国ICカタログの生成
+## 検証と配布
 
-配布ZIPには、GitHub Actions用の `.github/workflows/build-ic-data.yml` と `tools/build-ic-data.py` が入っています。
+Node.js 22とPython 3で実行します。追加パッケージは不要です。
 
-`main` に v0.7.2 を Push すると、GitHub Actions が既存の v0.7.1 と同じデータソース `N06_Joint_fixed.geojson` を取得し、現役の通常IC・スマートICだけを抽出して `ic-data.min.json` を生成し、リポジトリへコミットします。
+```sh
+node --check app.js
+node --test tests/local-ic.test.cjs
+python tools/package-release.py
+```
 
-これにより、**アプリ実行中に外部のIC検索サービスへ問い合わせる必要がなくなります**。`ic-data.min.json` の読み込みは Deadline Navi 自身の GitHub Pages から行う静的ファイル読み込みで、Google/NAVITIME/Overpass API呼び出しではありません。
+ZIPは `dist/deadline-nav-v0.7.2.zip` に生成されます。既知ICの存在、同梱読み込み、旧キャッシュからの切替、異常データ、外部IC検索遮断を検証し、必要ファイル不足なら生成を止めます。APIキーも有料API呼び出しも不要です。
 
-初回Push直後だけは生成処理に少し時間がかかります。Actionsの `Build bundled IC catalog` が成功し、`ic-data.min.json` が数百件以上になってから全国版として利用できます。すでにv0.7.1で全国カタログを取得済みの端末では、そのキャッシュを移行して先に動作できます。
+PRの `Verify local IC release` が同じ検証を実行し、ZIPをActions artifactとして保存します。マージ・公開は別操作です。
 
-## データ出典
+手動確認は `DEPLOY.md` を参照してください。テストはGoogleの実経路品質やSafariでの動作を保証しません。
 
-全国ICカタログは HighwayOrderedDS の `N06_Joint_fixed.geojson` を、v0.7.1 と同じ条件（現役 `N06_014=9999`、通常IC/スマートIC `N06_019=1/2`）で抽出したものです。
+## データ更新（開発時のみ）
 
-HighwayOrderedDS は国土交通省「国土数値情報（高速道路時系列データ）」等を加工したデータセットで、データセットは CC BY-SA 3.0 として公開されています。出典・ライセンス表示はアプリにも残しています。
+`Build bundled IC catalog` は固定リビジョンの元データを取得し、補完データを含めて生成・検証します。これは開発時の更新処理であり、利用者の起動時や走行中には実行しません。
 
-## この版ではまだ直していないこと
+```sh
+python tools/build-ic-data.py /path/to/N06_Joint_fixed.geojson ic-data.min.json
+node --test tests/local-ic.test.cjs
+```
 
-v0.7.1 の実測で確認された `Route Matrix Pro: 480 element` の削減は **v0.7.3以降**で行います。v0.7.2では、原因の切り分けを容易にするため Matrix 候補評価ロジックには極力触れていません。
+出典は `IC-DATA-NOTICE.md` を参照してください。
 
-## ファイル
+## 次の段階
 
-- `index.html`
-- `styles.css`
-- `app.js`
-- `manifest.webmanifest`
-- `version.json`
-- `ic-data.min.json`
-- `tools/build-ic-data.py`
-- `.github/workflows/build-ic-data.yml`
-- 各種アイコン
+1. v0.7.2：本変更の実機確認を完了する。
+2. v0.7.3：送信前に候補を絞り、合成チェックポイント・回復探索を含む「1計算全体」でMatrixを100要素未満に制限する。差分探索は含めない。
+3. v0.7.4：同一計算内の評価を保持し、回復探索で未評価の候補のみ送信する。
+4. v0.7.5：推奨ICの有効性を軽量に確認し、必要時のみ全探索する。
 
-運転中の画面操作は避け、安全な場所で設定してください。
+各段階で京都から大阪市都島区など同じ条件を使い、Matrix要素数と推奨結果を記録します。削減目標30〜40要素は候補の見落としとの比較後に判断します。

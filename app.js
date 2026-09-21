@@ -10,7 +10,7 @@
   const STORAGE_KEY_NATIONAL_IC_META_LEGACY = 'deadlineNavi.nationalIcMetaV071';
   const STORAGE_KEY_API_USAGE = 'deadlineNavi.apiUsageV071';
   const CURRENT_APP_VERSION = '0.7.2';
-  const LOCAL_IC_DATA_URL = './ic-data.min.json?v=072';
+  const LOCAL_IC_DATA_URL = './ic-data.min.json?v=072-local1';
   const LOCAL_IC_MIN_COMPLETE_COUNT = 300;
   const IC_DISCOVERY_NETWORK_DISABLED = true;
   const NATIONAL_IC_PREFILTER_LIMIT = 18;
@@ -165,6 +165,7 @@
   let navitimeBlockedReason = '';
   let nationalIcCatalog = [];
   let nationalIcMeta = null;
+  let nationalIcLoadPromise = null;
   let apiUsageMonth = createEmptyApiUsage();
   let apiUsageSession = createEmptyApiUsage();
   let apiUsageCurrent = createEmptyApiUsage();
@@ -980,7 +981,9 @@
     if (!els.apiUsageDiag) return;
     const catalogLine = nationalIcCatalog.length
       ? `全国ICカタログ: ${nationalIcCatalog.length.toLocaleString('ja-JP')}件（${nationalIcMeta?.bundled ? 'アプリ同梱' : 'v0.7.1端末キャッシュ'}）`
-      : '全国ICカタログ: 未読込';
+      : nationalIcMeta?.complete === false
+        ? '全国ICカタログ: 同梱データを利用できません（読み込み・検証失敗）'
+        : '全国ICカタログ: 未読込';
     els.apiUsageDiag.textContent = [
       formatUsageBlock('今回の計算', apiUsageCurrent),
       '',
@@ -1028,7 +1031,12 @@
     return type === '2' ? `${raw}SIC` : `${raw}IC`;
   }
 
-  async function ensureNationalIcCatalogV072() {
+  function ensureNationalIcCatalogV072() {
+    if (!nationalIcLoadPromise) nationalIcLoadPromise = loadNationalIcCatalogV072();
+    return nationalIcLoadPromise;
+  }
+
+  async function loadNationalIcCatalogV072() {
     if (nationalIcCatalog.length >= LOCAL_IC_MIN_COMPLETE_COUNT && nationalIcMeta?.bundled) {
       renderIcCatalogStatus();
       return nationalIcCatalog;
@@ -1053,7 +1061,8 @@
       const lat = Number(item?.lat);
       const lng = Number(item?.lng);
       const name = String(item?.name || '').trim();
-      if (!name || !Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+      if (!name || typeof item?.lat !== 'number' || typeof item?.lng !== 'number'
+        || !Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) continue;
       const key = normalizeIcKey(name);
       if (!key || seen.has(key)) continue;
       seen.add(key);
@@ -1066,13 +1075,15 @@
       });
     }
 
-    if (clean.length >= LOCAL_IC_MIN_COMPLETE_COUNT) {
+    if (localData?.meta?.complete === true && localData.meta.count === items.length
+      && clean.length === items.length && clean.length >= LOCAL_IC_MIN_COMPLETE_COUNT) {
       nationalIcCatalog = clean;
       nationalIcMeta = {
         sourceLabel: '全国ICカタログ',
         source: String(localData?.meta?.source || 'MLIT N06 derived / HighwayOrderedDS'),
         generatedAt: localData?.meta?.generatedAt || null,
         count: clean.length,
+        complete: true,
         bundled: true,
       };
       renderIcCatalogStatus();
@@ -1090,18 +1101,16 @@
       return nationalIcCatalog;
     }
 
-    nationalIcCatalog = clean;
+    nationalIcCatalog = [];
     nationalIcMeta = {
       sourceLabel: '全国ICカタログ',
       source: String(localData?.meta?.source || 'bundled seed'),
       generatedAt: localData?.meta?.generatedAt || null,
-      count: clean.length,
-      bundled: true,
+      count: 0,
+      bundled: false,
       complete: false,
     };
-    renderIcCatalogStatus(clean.length
-      ? `全国ICカタログ: ${clean.length.toLocaleString('ja-JP')}件（生成待ちの同梱データ）`
-      : '全国ICカタログは生成待ちです。内蔵候補だけで継続します。');
+    renderIcCatalogStatus('同梱ICカタログの読み込み・検証に失敗しました。内蔵候補だけで継続します。');
     renderApiUsageDiagnostic();
     return nationalIcCatalog;
   }
@@ -1533,9 +1542,7 @@
   }
 
   async function discoverCandidatePoolV070({ routePath, discoveryPoints, navitimeApiKey, includeBuiltins, destination, recovery = false }) {
-    if (!nationalIcCatalog.length) {
-      try { await ensureNationalIcCatalogV072(); } catch (_) { /* continue with local fallbacks only */ }
-    }
+    await ensureNationalIcCatalogV072();
     const national = nationalIcCandidatesNearRouteV071(
       routePath,
       discoveryPoints,
@@ -4031,3 +4038,4 @@
     return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
   }
 })();
+
