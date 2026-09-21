@@ -1,0 +1,51 @@
+name: Verify toll road graph
+
+on:
+  pull_request:
+    paths:
+      - 'tools/build-toll-graph.py'
+      - 'tests/toll-graph.test.cjs'
+      - '.github/workflows/verify-toll-graph.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  graph:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Unit tests
+        run: node --test tests/toll-graph.test.cjs
+      - name: Download pinned HighwayOrderedDS sources
+        run: |
+          curl --fail --location --retry 3 \
+            'https://raw.githubusercontent.com/yH3PO4/HighwayOrderedDS/523b06097594e58d2004928b032951f69bd45398/data/highway_point.geojson' \
+            --output /tmp/highway_point.geojson
+          curl --fail --location --retry 3 \
+            'https://raw.githubusercontent.com/yH3PO4/HighwayOrderedDS/523b06097594e58d2004928b032951f69bd45398/data/highway_path.geojson' \
+            --output /tmp/highway_path.geojson
+      - name: Build graph from real source
+        run: python3 tools/build-toll-graph.py /tmp/highway_point.geojson /tmp/highway_path.geojson /tmp/toll-road-graph.min.json
+      - name: Validate graph metadata
+        run: |
+          python3 - <<'PY'
+          import json
+          d=json.load(open('/tmp/toll-road-graph.min.json',encoding='utf-8'))
+          m=d['meta']
+          assert m['nodeCount'] >= 300, m
+          assert m['roadEdgeCount'] >= 200, m
+          assert m['completeForPricing'] is False
+          print(json.dumps(m,ensure_ascii=False,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: toll-road-graph-prototype
+          path: /tmp/toll-road-graph.min.json
