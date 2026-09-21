@@ -39,7 +39,11 @@ test('discovery waits for bundle even with legacy cache; Oguraike is local', asy
   const a = app(catalog, catalog.items.filter(x=>x.name!=='巨椋池IC'));
   const routePath = [{lat:34.908806,lng:135.7495333},{lat:34.899,lng:135.745}];
   const pool = await a.discoverCandidatePoolV070({routePath, discoveryPoints:[routePath[0]], includeBuiltins:false, destination:'大阪'});
-  assert.ok(pool.some(x=>x.name==='巨椋池IC' && x.source==='NATIONAL'));
+  const oguraike = pool.find(x=>x.name==='巨椋池IC' && x.source==='NATIONAL');
+  assert.ok(oguraike);
+  assert.equal(oguraike.waypoint, '巨椋池IC, 日本');
+  assert.equal(oguraike.mapWaypoint.lat, 34.908806);
+  assert.equal(oguraike.mapWaypoint.lng, 135.7495333);
   assert.equal(a.getMeta().bundled, true);
   assert.equal(a.calls.length,1);
 });
