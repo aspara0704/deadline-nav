@@ -208,6 +208,45 @@ class OSMCollector(osmium.SimpleHandler):
         self.ways.append({"id": int(w.id), "nodes": nodes, "tags": tags})
 
 
+def junction_access_ids(graph, name, radius_km=0.9):
+    key = normalize_name(name)
+    anchors = graph.get("junctionIndex", {}).get(key) or []
+    if not anchors:
+        return []
+    nodes = graph.get("nodes", [])
+    by_id = {int(n["id"]): n for n in nodes}
+    anchor_points = []
+    for node_id in anchors:
+        n = by_id.get(int(node_id))
+        if n:
+            anchor_points.append((float(n["lat"]), float(n["lng"])))
+    if not anchor_points:
+        return []
+
+    incident = set()
+    for e in graph.get("edges", []):
+        incident.add(int(e["from"]))
+        incident.add(int(e["to"]))
+
+    out = []
+    for n in nodes:
+        node_id = int(n["id"])
+        if node_id not in incident:
+            continue
+        p = (float(n["lat"]), float(n["lng"]))
+        if min(haversine_km(p, a) for a in anchor_points) <= radius_km:
+            out.append(node_id)
+    return out
+
+
+def shortest_distance_between_junctions(graph, start_name, goal_name, radius_km=0.9):
+    start_ids = junction_access_ids(graph, start_name, radius_km)
+    goal_ids = junction_access_ids(graph, goal_name, radius_km)
+    if not start_ids or not goal_ids:
+        return None, []
+    return shortest_distance(graph, start_ids, goal_ids)
+
+
 def shortest_distance(graph, start_ids, goal_ids):
     import heapq
     goals = set(int(x) for x in goal_ids)
