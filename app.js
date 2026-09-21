@@ -1129,7 +1129,12 @@
         id: stored.id || `national-${normalizeIcKey(stored.name)}`,
         name: stored.name,
         road: stored.smart ? '全国ICカタログ / スマートIC' : '全国ICカタログ',
-        waypoint: point,
+        // The bundled catalog coordinate is for spatial discovery/projection.
+        // It may be an IC representative point on the expressway itself, which
+        // can be unreachable when the local leg explicitly avoids highways.
+        // Route by the IC name (as v0.7.1 did for OSM/built-in candidates) while
+        // retaining the bundled coordinate only for corridor ranking.
+        waypoint: `${stored.name}, 日本`,
         mapWaypoint: point,
         source: 'NATIONAL',
         ...projection,
